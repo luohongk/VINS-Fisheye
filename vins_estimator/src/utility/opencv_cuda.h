@@ -3,6 +3,8 @@
 #include <opencv2/opencv.hpp>
 
 #ifdef USE_CUDA
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudaoptflow.hpp>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/cudastereo.hpp>
 #include <opencv2/cudawarping.hpp>
