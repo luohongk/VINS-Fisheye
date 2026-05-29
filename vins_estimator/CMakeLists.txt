@@ -171,3 +171,18 @@ target_link_libraries(vins_node_fisheye vins_lib fisheyeNode_lib estimator_lib v
 
 add_library(vins_nodelet_lib src/rosNodelet.cpp)
 target_link_libraries(vins_nodelet_lib vins_lib fisheyeNode_lib estimator_lib vins_frontend stereo_depth vins_factors_lib vins_params_lib OpenMP::OpenMP_CXX)
+
+# Install python helper scripts so `rosrun vins pad_fisheye_node.py` works.
+# We bypass catkin_install_python because, on a fresh build, it tries to
+# write into ${CMAKE_CURRENT_BINARY_DIR}/catkin_generated/installspace/
+# before catkin has created that directory, causing
+#   "file failed to open for writing (No such file or directory)".
+# Instead we put a symlink straight into the devel-space lib dir, which
+# is exactly what `rosrun` looks at.
+file(MAKE_DIRECTORY "${CATKIN_DEVEL_PREFIX}/lib/${PROJECT_NAME}")
+execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/pad_fisheye_node.py"
+    "${CATKIN_DEVEL_PREFIX}/lib/${PROJECT_NAME}/pad_fisheye_node.py")
+execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/viz_fisheye_tracking.py"
+    "${CATKIN_DEVEL_PREFIX}/lib/${PROJECT_NAME}/viz_fisheye_tracking.py")

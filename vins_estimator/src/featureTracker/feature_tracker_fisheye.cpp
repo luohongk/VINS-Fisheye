@@ -54,6 +54,15 @@ FeatureFrame FisheyeFeatureTrackerOpenMP::trackImage(double _cur_time, cv::Input
     top_size = up_top_img.size();
     side_size = up_side_img.size();
 
+    ROS_INFO_THROTTLE(2.0,
+        "[VINS-DBG][trackFE] t=%.3f up_imgs=%zu down_imgs=%zu  "
+        "top=%dx%d  side=%dx%d  enable_*_top/side = %d/%d/%d/%d  prev_up_top_pts=%zu prev_up_side_pts=%zu",
+        _cur_time, fisheye_imgs_up.size(), fisheye_imgs_down.size(),
+        top_size.width, top_size.height, side_size.width, side_size.height,
+        (int)enable_up_top, (int)enable_up_side,
+        (int)enable_down_top, (int)enable_down_side,
+        prev_up_top_pts.size(), prev_up_side_pts.size());
+
     //Clear All current pts
     cur_up_top_pts.clear();
     cur_up_side_pts.clear();
@@ -191,12 +200,24 @@ FeatureFrame FisheyeFeatureTrackerOpenMP::trackImage(double _cur_time, cv::Input
         if (enable_down_side) {
             ids_down_side = ids_up_side;
             std::vector<cv::Point2f> down_side_init_pts = cur_up_side_pts;
+            ROS_INFO_THROTTLE(2.0,
+                "[VINS-DBG][stereo] up_side_pts=%zu  -> down_side opticalflow track%s",
+                down_side_init_pts.size(),
+                down_side_init_pts.empty() ? " [SKIPPED: empty up_side_pts]" : "");
             if (down_side_init_pts.size() > 0) {
-                cur_down_side_pts = opticalflow_track(down_side_img, down_side_pyr, up_side_img, 
+                cur_down_side_pts = opticalflow_track(down_side_img, down_side_pyr, up_side_img,
                     up_side_pyr, down_side_init_pts, ids_down_side, track_down_side_cnt, removed_pts, predict_down_side);
+                ROS_INFO_THROTTLE(2.0,
+                    "[VINS-DBG][stereo] down_side_pts after track = %zu",
+                    cur_down_side_pts.size());
             }
         }
     }
+
+    ROS_INFO_THROTTLE(2.0,
+        "[VINS-DBG][trackFE/done] up_top=%zu  up_side=%zu  down_top=%zu  down_side=%zu",
+        cur_up_top_pts.size(), cur_up_side_pts.size(),
+        cur_down_top_pts.size(), cur_down_side_pts.size());
 
     // ROS_INFO("Tracker 2 cost %fms", t_tk.toc());
 

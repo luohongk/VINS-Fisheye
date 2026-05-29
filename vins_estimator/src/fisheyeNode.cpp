@@ -66,6 +66,13 @@ void FisheyeFlattenHandler::imgs_callback(double t, const cv::Mat & img1, const 
 
     count += 1;
 
+    if (!is_blank_init) {
+        ROS_INFO_THROTTLE(2.0,
+            "[VINS-DBG][undist_in] cam0=%dx%d type=%d cam1=%dx%d type=%d t=%.3f",
+            img1.cols, img1.rows, img1.type(),
+            img2.cols, img2.rows, img2.type(), t);
+    }
+
     TicToc t_f;
 
     if (USE_GPU) {
@@ -414,6 +421,16 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
             if (is_odometry_frame) {
                 need_to_pack_and_send = true;
             }
+            ROS_INFO_THROTTLE(2.0,
+                "[VINS-DBG][to_estimator] up_gray=%zu sub-imgs (e.g. %dx%d) "
+                "down_gray=%zu sub-imgs (e.g. %dx%d) odom_frame=%d t=%.3f",
+                cur_up_gray.size(),
+                cur_up_gray.empty()   ? 0 : cur_up_gray[0].cols,
+                cur_up_gray.empty()   ? 0 : cur_up_gray[0].rows,
+                cur_down_gray.size(),
+                cur_down_gray.empty() ? 0 : cur_down_gray[0].cols,
+                cur_down_gray.empty() ? 0 : cur_down_gray[0].rows,
+                int(is_odometry_frame), cur_frame_t);
             estimator.inputFisheyeImage(cur_frame_t, cur_up_gray, cur_down_gray);
         }
         double t_0 = t0.toc();
@@ -429,6 +446,11 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
 
 void VinsNodeBaseClass::fisheye_imgs_callback(const sensor_msgs::ImageConstPtr &img1_msg, const sensor_msgs::ImageConstPtr &img2_msg) {
     TicToc tic_input;
+    ROS_INFO_THROTTLE(2.0,
+        "[VINS-DBG][raw_cb] cam0=%dx%d enc=%s cam1=%dx%d enc=%s t=%.3f",
+        img1_msg->width, img1_msg->height, img1_msg->encoding.c_str(),
+        img2_msg->width, img2_msg->height, img2_msg->encoding.c_str(),
+        img1_msg->header.stamp.toSec());
     fisheye_handler->imgs_callback(img1_msg, img2_msg);
 
     if (img1_msg->header.stamp.toSec() - t_last > 0.11) {
@@ -441,6 +463,11 @@ void VinsNodeBaseClass::fisheye_comp_imgs_callback(const sensor_msgs::Compressed
     TicToc tic_input;
     auto img1 = getImageFromMsg(img1_msg);
     auto img2 = getImageFromMsg(img2_msg);
+    ROS_INFO_THROTTLE(2.0,
+        "[VINS-DBG][comp_cb] cam0=%dx%d cam1=%dx%d t=%.3f bytes=(%zu,%zu)",
+        img1.cols, img1.rows, img2.cols, img2.rows,
+        img1_msg->header.stamp.toSec(),
+        img1_msg->data.size(), img2_msg->data.size());
 
     fisheye_handler->imgs_callback(img1_msg->header.stamp.toSec(), img1, img2);
 

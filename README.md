@@ -33,6 +33,92 @@ catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 
 常用命令
 
+
+
+
+ 标准化用法
+
+  每次 my_kalibr_result/ 里的 yaml 变了,只需:
+
+  cd /home/lhk/workspace/VINS-Fisheye
+  ./scripts/regen_vins_config.sh
+
+  输出会完全重写 config/my_kalibr_fisheye/ 和 launch 文件,幂等可重入。
+
+  脚本能力
+
+  kalibr_to_vins.py 自动处理的事:
+
+  ┌──────────────────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+  │         行为         │                                        说明                                         │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 自动发现 kalibr 文件 │ 用 glob 匹配 *camchain-imucam*.yaml 等,文件名变了也能找到                           │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 自动检测相机数量     │ 看 camchain 里有几个 camN,逐个生成 yaml                                             │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 多种相机模型         │ omni-radtan → MEI;pinhole-radtan → PINHOLE;pinhole-equi → KANNALA_BRANDT            │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 外参链式计算         │ body_T_camN = T_imu_cam0 · inv(T_camN_cam0),T_camN_cam0 通过逐级累乘 T_cn_cnm1 得到 │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 自动写 OpenCV YAML   │ 保留 %YAML:1.0 + !!opencv-matrix 格式(PyYAML 自动 dump 不行)                        │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ 时间偏移             │ 直接读 kalibr timeshift_cam_imu 写成 td                                             │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+  │ IMU 噪声放大         │ --imu-noise-scale 默认 ×10(VIO 实战经验)                                            │
+  └──────────────────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+
+  常见调整(用环境变量或 CLI 覆盖)
+
+# 换成后向相机对
+
+  CAM_PAIR=2,3 ./scripts/regen_vins_config.sh
+
+# 换 IMU topic
+
+  IMU_TOPIC=/imu/data ./scripts/regen_vins_config.sh
+
+# 换图像 topic 映射
+
+  TOPIC_MAP="0:/cam_a/image,1:/cam_b/image" ./scripts/regen_vins_config.sh
+
+# 不放大 IMU 噪声
+
+  IMU_NOISE_SCALE=1.0 ./scripts/regen_vins_config.sh
+
+# 关闭压缩图模式(需自己 republish)
+
+  ./scripts/regen_vins_config.sh --no-compressed
+
+# 直接看完整选项
+
+  python3 scripts/kalibr_to_vins.py --help
+
+  运行
+
+# Terminal 1
+
+```
+source ~/catkin_ws/devel/setup.bash
+roslaunch vins my_kalibr_fisheye.launch
+```
+
+  catkin_make && source devel/setup.bash
+  roslaunch vins my_kalibr_fisheye.launch
+
+# Terminal 2
+
+```
+source ~/catkin_ws/devel/setup.bash
+rosbag play /home/lhk/data/Calibration/20260528-164331.bag --clock
+```
+
+source ～/catkin_make/devel/setup.bash
+
+  rosbag play /home/lhk/data/Calibration/20260528-164331.bag --clock
+
+
+
+
 # ---- 构建 ----
 
   docker compose --profile cpu build                       # 只构建 CPU

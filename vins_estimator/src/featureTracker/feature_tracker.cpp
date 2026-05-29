@@ -264,38 +264,60 @@ vector<cv::Point2f> opticalflow_track(cv::Mat & cur_img, vector<cv::Mat> * cur_p
     TicToc t_og;
     status.clear();
     vector<float> err;
-    
+
     TicToc t_build;
 
     TicToc t_calc;
-    cv::calcOpticalFlowPyrLK(*prev_pyr, *cur_pyr, prev_pts, cur_pts, status, err, WIN_SIZE, PYR_LEVEL, 
+    ROS_INFO_THROTTLE(2.0,
+        "[VINS-DBG][optflow:fwd] prev_pts=%zu cur_pts(seed)=%zu predictions=%zu "
+        "prev_pyr=%zu cur_pyr=%zu",
+        prev_pts.size(), cur_pts.size(), prediction_points.size(),
+        prev_pyr->size(), cur_pyr->size());
+    cv::calcOpticalFlowPyrLK(*prev_pyr, *cur_pyr, prev_pts, cur_pts, status, err, WIN_SIZE, PYR_LEVEL,
         cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
     // cv::calcOpticalFlowPyrLK(prev_img, cur_img, prev_pts, cur_pts, status, err, WIN_SIZE, PYR_LEVEL);
-    // std::cout << "Track img Prev pts" << prev_pts.size() << " TS " << t_calc.toc() << std::endl;    
+    // std::cout << "Track img Prev pts" << prev_pts.size() << " TS " << t_calc.toc() << std::endl;
+    {
+        size_t fwd_ok = 0;
+        for (auto s : status) if (s) fwd_ok++;
+        ROS_INFO_THROTTLE(2.0,
+            "[VINS-DBG][optflow:fwd] OK %zu / %zu", fwd_ok, status.size());
+    }
     if(FLOW_BACK)
     {
-        vector<cv::Point2f> reverse_pts;
+        // OPTFLOW_USE_INITIAL_FLOW requires reverse_pts to be pre-sized
+        // and roughly correct. We're tracking cur_pts BACKWARD into the
+        // previous frame, so the initial guess is the original prev_pts.
+        vector<cv::Point2f> reverse_pts = prev_pts;
         vector<uchar> reverse_status;
+        ROS_INFO_THROTTLE(2.0,
+            "[VINS-DBG][optflow:rev] cur_pts=%zu reverse_pts(seed)=%zu",
+            cur_pts.size(), reverse_pts.size());
         cv::calcOpticalFlowPyrLK(*cur_pyr, *prev_pyr, cur_pts, reverse_pts, reverse_status, err, WIN_SIZE, PYR_LEVEL,
             cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
         // cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, WIN_SIZE, PYR_LEVEL);
 
+        size_t back_kept = 0;
         for(size_t i = 0; i < status.size(); i++)
         {
             if(status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
             {
                 status[i] = 1;
+                back_kept++;
             }
             else
                 status[i] = 0;
         }
+        ROS_INFO_THROTTLE(2.0,
+            "[VINS-DBG][optflow:rev] kept %zu / %zu after reverse-flow consistency",
+            back_kept, status.size());
     }
 
     for (int i = 0; i < int(cur_pts.size()); i++){
         if (status[i] && !inBorder(cur_pts[i], cur_img.size())) {
             status[i] = 0;
         }
-    }   
+    }
     reduceVector(prev_pts, status);
     reduceVector(cur_pts, status);
     reduceVector(ids, status);
