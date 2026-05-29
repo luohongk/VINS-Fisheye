@@ -7,9 +7,9 @@
 # Camera pair selected: cam0 + cam1
 # IMU topic           : /imu_data_raw
 # Source bag topics   : /fisheye/left/image_raw / /fisheye/right/image_raw
-# VINS subscribes to  : /fisheye/left/image_padded / /fisheye/right/image_padded
-# Compressed input    : False
-# Padding             : top=360 bottom=360 left=0 right=0
+# VINS subscribes to  : /fisheye/left/image_raw / /fisheye/right/image_raw
+# Compressed input    : True
+# Padding             : top=0 bottom=0 left=0 right=0
 #                       (pad_fisheye_node.py rebuilds the symmetric fisheye)
 # is_fisheye          : 1  (1 = dual-fisheye spherical mode;
 #                       this fork only implements the is_fisheye:1 path —
@@ -26,15 +26,15 @@ is_fisheye: 1
 imu_topic: "/imu_data_raw"
 
 # Raw image topics (used when is_compressed_images:0)
-image0_topic: "/fisheye/left/image_padded"
-image1_topic: "/fisheye/right/image_padded"
+image0_topic: "/fisheye/left/image_raw"
+image1_topic: "/fisheye/right/image_raw"
 
 # Compressed image topics (used when is_compressed_images:1)
-is_compressed_images: 0
-compressed_image0_topic: "/fisheye/left/image_padded/compressed"
-compressed_image1_topic: "/fisheye/right/image_padded/compressed"
+is_compressed_images: 1
+compressed_image0_topic: "/fisheye/left/image_raw/compressed"
+compressed_image1_topic: "/fisheye/right/image_raw/compressed"
 
-output_path: "/home/lhk/output"
+output_path: "/data/output"
 
 cam0_calib: "cam0_mei.yaml"
 cam1_calib: "cam1_mei.yaml"
@@ -42,7 +42,7 @@ cam1_calib: "cam1_mei.yaml"
 # image_width/height here are the FLATTENED virtual-pinhole sub-image
 # dimensions (used as WIDTH inside FisheyeUndist), NOT the input fisheye
 # resolution. Recommended 300-600 for VIO. The actual padded input size
-# (1920 x 1920) is declared inside cam0_*.yaml / cam1_*.yaml.
+# (1920 x 1200) is declared inside cam0_*.yaml / cam1_*.yaml.
 image_width: 600
 image_height: 200
 show_width: 1080      # SHOW_WIDTH for the show_track visualization
@@ -79,11 +79,11 @@ use_vxworks: 0
 # Dual-fisheye sub-image flags. Each fisheye camera is unwarped into
 # 5 virtual pinhole sub-images (top + 4 sides). For forward-facing stereo
 # the "top" sub-image (cam optical axis) is the most useful one.
-fisheye_fov: 235.0
+fisheye_fov: 205.0
 enable_up_top: 1
 enable_down_top: 1
-enable_up_side: 1
-enable_down_side: 1
+enable_up_side: 0
+enable_down_side: 0
 enable_rear_side: 0
 thres_outlier: 5.0
 tri_max_err: 3.0
@@ -96,7 +96,7 @@ enable_depth: 0
 rgb_depth_cloud: -1
 depth_estimate_baseline: 0.05
 depth_config: "depth_cpu.yaml"
-top_cnt: 30
+top_cnt: 150
 side_cnt: 100
 
 #feature tracker parameters
@@ -120,11 +120,11 @@ max_solver_time: 0.04
 max_num_iterations: 8
 keyframe_parallax: 10.0
 
-#imu parameters (kalibr-derived, scaled by --imu-noise-scale = 10.0)
-acc_n: 0.08485567
-gyr_n: 0.06263867
-acc_w: 0.00492452
-gyr_w: 0.00291066
+#imu parameters (kalibr-derived, scaled by --imu-noise-scale = 5.0)
+acc_n: 0.042427835
+gyr_n: 0.031319335
+acc_w: 0.00246226
+gyr_w: 0.00145533
 g_norm: 9.81
 
 #unsynchronization parameters

@@ -104,7 +104,7 @@ Visualization Manager:
           Head Length: 0.20000000298023224
           Length: 0.30000001192092896
           Line Style: Billboards
-          Line Width: 0.05000000074505806
+          Line Width: 0.07999999821186066
           Name: loopPath
           Offset:
             X: 0
@@ -203,7 +203,7 @@ Visualization Manager:
           Head Length: 0.20000000298023224
           Length: 0.30000001192092896
           Line Style: Billboards
-          Line Width: 0.019999999552965164
+          Line Width: 0.10000000149011612
           Name: VIOPath
           Offset:
             X: 0
@@ -298,7 +298,7 @@ Visualization Manager:
           Head Length: 0.20000000298023224
           Length: 0.30000001192092896
           Line Style: Lines
-          Line Width: 0.029999999329447746
+          Line Width: 0.05999999865889549
           Name: GloablPath
           Offset:
             X: 0
@@ -403,7 +403,7 @@ Visualization Manager:
       Value: true
   Enabled: true
   Global Options:
-    Background Color: 211; 215; 207
+    Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: world
     Frame Rate: 30

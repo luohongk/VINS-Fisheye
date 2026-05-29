@@ -392,7 +392,7 @@ enable_depth: 0
 rgb_depth_cloud: -1
 depth_estimate_baseline: 0.05
 depth_config: "depth_cpu.yaml"
-top_cnt: 30
+top_cnt: 150
 side_cnt: 100
 
 #feature tracker parameters
@@ -507,7 +507,7 @@ def emit_launch(launch_dir: Path, launch_name: str, config_path: Path,
     viz_xml = ""
     if viz_spec:
         viz_xml = f"""
-    <!-- Stereo fisheye tracking visualizer (independent of VINS internal show_track) -->
+    <!-- Stereo fisheye tracking + VINS trajectory visualizer -->
     <node pkg="vins" type="viz_fisheye_tracking.py" name="viz_fisheye_tracking"
           output="screen">
         <param name="left_topic"       type="string" value="{viz_spec['left_topic']}"/>
@@ -516,9 +516,14 @@ def emit_launch(launch_dir: Path, launch_name: str, config_path: Path,
         <param name="right_compressed" type="bool"   value="{str(bool(viz_spec['right_compressed'])).lower()}"/>
         <param name="display"          type="bool"   value="{str(bool(viz_spec.get('display', True))).lower()}"/>
         <param name="show_width"       type="int"    value="{int(viz_spec.get('show_width', 1600))}"/>
+        <param name="traj_height"      type="int"    value="{int(viz_spec.get('traj_height', 360))}"/>
+        <param name="header_height"    type="int"    value="{int(viz_spec.get('header_height', 44))}"/>
         <param name="max_corners"      type="int"    value="{int(viz_spec.get('max_corners', 200))}"/>
         <param name="min_distance"     type="int"    value="{int(viz_spec.get('min_distance', 25))}"/>
+        <param name="trail_length"     type="int"    value="{int(viz_spec.get('trail_length', 12))}"/>
         <param name="output_topic"     type="string" value="{viz_spec.get('output_topic', '/vins/fisheye_track')}"/>
+        <param name="path_topic"       type="string" value="{viz_spec.get('path_topic', '/vins_estimator/path')}"/>
+        <param name="odom_topic"       type="string" value="{viz_spec.get('odom_topic', '/vins_estimator/odometry')}"/>
         <param name="mask_path"        type="string" value="{_pkg_rel(viz_spec.get('mask_path', ''))}"/>
     </node>
 """
@@ -793,6 +798,11 @@ def main(argv=None):
             "show_width": 1600,
             "max_corners": 200,
             "min_distance": 25,
+            "trail_length": 12,
+            "traj_height": 360,
+            "header_height": 44,
+            "path_topic": "/vins_estimator/path",
+            "odom_topic": "/vins_estimator/odometry",
             "output_topic": "/vins/fisheye_track",
             "mask_path": str(Path(args.fisheye_mask).resolve()) if args.fisheye_mask else "",
         }
