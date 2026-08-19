@@ -84,3 +84,5 @@ vins_estimator/GPATH
 vins_estimator/GRTAGS
 vins_estimator/GTAGS
 .gitignore
+debug
+log

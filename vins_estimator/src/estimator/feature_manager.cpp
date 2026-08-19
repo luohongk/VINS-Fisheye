@@ -140,7 +140,11 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
     for (auto &_it : feature)
     {
         auto & it = _it.second;
-        if (it.start_frame <= frame_count_l && it.endFrame() >= frame_count_r)
+        // The monocular SFM initializer uses cam0 poses/extrinsics.  Mixing
+        // independent cam1 tracks into the same correspondence set makes the
+        // essential matrix physically inconsistent and corrupts VIO scale.
+        if (it.main_cam == 0 &&
+            it.start_frame <= frame_count_l && it.endFrame() >= frame_count_r)
         {
             Vector3d a = Vector3d::Zero(), b = Vector3d::Zero();
             int idx_l = frame_count_l - it.start_frame;
@@ -149,6 +153,15 @@ vector<pair<Vector3d, Vector3d>> FeatureManager::getCorresponding(int frame_coun
             a = it.feature_per_frame[idx_l].point;
 
             b = it.feature_per_frame[idx_r].point;
+
+#ifdef UNIT_SPHERE_ERROR
+            // OpenCV's five-point solver expects normalized-plane coordinates,
+            // while the fisheye tracker stores unit-sphere bearings.
+            if (std::abs(a.z()) < 1e-6 || std::abs(b.z()) < 1e-6)
+                continue;
+            a /= a.z();
+            b /= b.z();
+#endif
             
             corres.push_back(make_pair(a, b));
         }

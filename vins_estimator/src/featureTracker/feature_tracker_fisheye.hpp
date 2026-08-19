@@ -334,7 +334,7 @@ void BaseFisheyeFeatureTracker<CvMat>::readIntrinsicParameter(const vector<strin
         m_camera.push_back(camera);
 
         ROS_INFO("Use as fisheye %s", calib_file[i].c_str());
-        FisheyeUndist un(calib_file[i].c_str(), i, FISHEYE_FOV, true, WIDTH);
+        FisheyeUndist un(calib_file[i].c_str(), i, FISHEYE_FOV, USE_GPU, WIDTH);
         fisheys_undists.push_back(un);
 
     }

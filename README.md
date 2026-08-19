@@ -1,5 +1,39 @@
 # VINS-Fisheye
 
+## 20260818 数据：Kalibr EUCM → VINS-Fisheye-loop
+
+本数据使用 Kalibr `cam1 + cam2`（约 6.56 cm 基线）、压缩图像
+`/cam1/image/compressed`、`/cam2/image/compressed` 和 IMU
+`/imu/data_raw`。配置可重复生成：
+
+```bash
+cd /home/lhk/workspace/VINS-Fisheye
+./scripts/prepare_vins_fisheye_loop.sh
+```
+
+原始 bag 的 LZ4 frame 能被标准 LZ4 解码，但 ROS Noetic 的 `roslz4`
+会报 `ROSLZ4_DATA_ERROR`。首次运行前生成一个不覆盖原文件的修复版：
+
+```bash
+python3 scripts/repair_rosbag_lz4.py \
+  /home/lhk/data/20260818-160433.bag \
+  /home/lhk/data/20260818-160433.repaired.bag
+```
+
+容器内一键编译（可选）、启动 VINS + loop_fusion 并播放 bag：
+
+```bash
+docker exec -it vins-fisheye-gpu bash -lc '
+  cd /root/catkin_ws/src/VINS-Fisheye &&
+  REBUILD=1 VIZ=true TRACKING_VIZ=true \
+  ./scripts/run_vins_fisheye_loop_container.sh \
+  /data/20260818-160433.repaired.bag
+'
+```
+
+无界面运行时将 `VIZ=false TRACKING_VIZ=false`。输出为
+`data/vio.csv`（VIO）和 `data/vio_loop.csv`（回环位姿图轨迹）。
+
 This repository is a Fisheye version of [VINS-Fusion](https://github.com/HKUST-Aerial-Robotics/VINS-Fusion) with GPU and Visionworks acceleration. It can run on Nvidia TX2 in real-time, also provide depth estimation based on fisheye. This project stands as a part of __[Omni-swarm](https://arxiv.org/abs/2103.04131): A Decentralized Omnidirectional Visual-Inertial-UWB State Estimation System for Aerial Swarm__. You may use it alone on any type of robot or as a part of Omni-swarm for swarm robots.
 
 Only stereo visual-inertial-odometry is supported for fisheye cameras now. Loop closure module for fisheye camera will release later.
@@ -32,9 +66,6 @@ xhost +local:root && docker run -it --gpus all --network=host --privileged -v /t
 catkin_make -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -j8
 
 常用命令
-
-
-
 
  标准化用法
 
@@ -102,6 +133,11 @@ source ~/catkin_ws/devel/setup.bash
 roslaunch vins my_kalibr_fisheye.launch
 ```
 
+```
+source ~/catkin_ws/devel/setup.bash
+roslaunch vins my_4cam_kalibr_fisheye.launch
+```
+
   catkin_make && source devel/setup.bash
   roslaunch vins my_kalibr_fisheye.launch
 
@@ -112,12 +148,8 @@ source ~/catkin_ws/devel/setup.bash
 rosbag play /home/lhk/data/Calibration/20260528-164331.bag --clock
 ```
 
-source ～/catkin_make/devel/setup.bash
-
-  rosbag play /home/lhk/data/Calibration/20260528-164331.bag --clock
-
-
-
+source ～/catkin_ws/devel/setup.bash
+rosbag play /home/lhk/data/Calibration/20260528-164331.bag --clock
 
 # ---- 构建 ----
 
@@ -258,7 +290,6 @@ depth_cloud_radius: 10
 pub_cloud_all: 1
 #If publish all depth cloud in every direction
 pub_cloud_per_direction: 0
-
 ```
 
 # Related Paper

@@ -145,8 +145,8 @@ void readParameters(std::string config_file)
     USE_GPU = fsSettings["use_gpu"];
 #ifndef USE_CUDA
         if (USE_GPU) {
-            std::cerr << "Must set USE_CUDA on in CMake to enable cuda!!!" << std::endl;
-            exit(-1);
+            std::cerr << "USE_CUDA is not enabled in CMake; falling back to CPU." << std::endl;
+            USE_GPU = 0;
         }
 #endif
     FISHEYE = fsSettings["is_fisheye"];

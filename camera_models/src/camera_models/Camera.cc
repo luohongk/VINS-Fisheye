@@ -19,6 +19,9 @@ Camera::Parameters::Parameters(ModelType modelType)
     case PINHOLE:
         m_nIntrinsics = 8;
         break;
+    case EUCM:
+        m_nIntrinsics = 6;
+        break;
     case SCARAMUZZA:
         m_nIntrinsics = SCARAMUZZA_CAMERA_NUM_PARAMS;
         break;
@@ -43,6 +46,9 @@ Camera::Parameters::Parameters(ModelType modelType,
         break;
     case PINHOLE:
         m_nIntrinsics = 8;
+        break;
+    case EUCM:
+        m_nIntrinsics = 6;
         break;
     case SCARAMUZZA:
         m_nIntrinsics = SCARAMUZZA_CAMERA_NUM_PARAMS;

@@ -49,7 +49,6 @@ class FisheyeUndist;
 
 namespace FeatureTracker {
 
-
 class BaseFeatureTracker {
 public:
     BaseFeatureTracker(Estimator * _estimator):
@@ -129,4 +128,3 @@ void detectPoints(cv::InputArray img, cv::InputArray mask, vector<cv::Point2f> &
 bool inBorder(const cv::Point2f &pt, cv::Size shape);
 
 };
-

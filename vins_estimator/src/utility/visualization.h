@@ -36,6 +36,7 @@ extern ros::Publisher pub_key_poses;
 extern ros::Publisher pub_ref_pose, pub_cur_pose;
 extern ros::Publisher pub_key;
 extern ros::Publisher pub_bias;
+extern ros::Publisher pub_keyframe_image;
 extern nav_msgs::Path path;
 extern ros::Publisher pub_pose_graph;
 extern int IMAGE_ROW, IMAGE_COL;
@@ -59,3 +60,9 @@ void pubPointCloud(const Estimator &estimator, const std_msgs::Header &header);
 void pubTF(const Estimator &estimator, const std_msgs::Header &header);
 
 void pubKeyframe(const Estimator &estimator);
+
+// Preserve the first valid loop-closure keyframes while estimator trajectory
+// publication is held back by the post-initialization stability warmup.
+void bufferWarmupKeyframe(const Estimator &estimator);
+void flushWarmupKeyframes();
+void clearWarmupKeyframes();

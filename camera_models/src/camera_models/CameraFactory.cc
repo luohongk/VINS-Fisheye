@@ -3,6 +3,7 @@
 #include "camodocal/camera_models/CameraFactory.h"
 #include "camodocal/camera_models/CataCamera.h"
 #include "camodocal/camera_models/EquidistantCamera.h"
+#include "camodocal/camera_models/EucmCamera.h"
 #include "camodocal/camera_models/PinholeCamera.h"
 #include "camodocal/camera_models/PinholeFullCamera.h"
 #include "camodocal/camera_models/PolyFisheyeCamera.h"
@@ -77,6 +78,16 @@ CameraFactory::generateCamera( Camera::ModelType modelType, const std::string& c
             camera->setParameters( params );
             return camera;
         }
+        case Camera::EUCM:
+        {
+            EucmCameraPtr camera(new EucmCamera);
+            EucmCamera::Parameters params = camera->getParameters();
+            params.cameraName() = cameraName;
+            params.imageWidth() = imageSize.width;
+            params.imageHeight() = imageSize.height;
+            camera->setParameters(params);
+            return camera;
+        }
         case Camera::MEI:
         default:
         {
@@ -132,6 +143,10 @@ CameraFactory::generateCameraFromYamlFile( const std::string& filename )
         {
             modelType = Camera::POLYFISHEYE;
         }
+        else if ( boost::iequals( sModelType, "EUCM" ) )
+        {
+            modelType = Camera::EUCM;
+        }
         else
         {
             std::cerr << "# ERROR: Unknown camera model: " << sModelType << std::endl;
@@ -184,6 +199,15 @@ CameraFactory::generateCameraFromYamlFile( const std::string& filename )
             PolyFisheyeCamera::Parameters params = camera->getParameters( );
             params.readFromYamlFile( filename );
             camera->setParameters( params );
+            return camera;
+        }
+        case Camera::EUCM:
+        {
+            EucmCameraPtr camera(new EucmCamera);
+            EucmCamera::Parameters params = camera->getParameters();
+            if (!params.readFromYamlFile(filename))
+                return CameraPtr();
+            camera->setParameters(params);
             return camera;
         }
         case Camera::MEI:

@@ -16,6 +16,7 @@
 #include <ceres/ceres.h>
 #include <unordered_map>
 #include <queue>
+#include <deque>
 #include <opencv2/core/eigen.hpp>
 #include <eigen3/Eigen/Dense>
 #include <eigen3/Eigen/Geometry>
@@ -45,6 +46,7 @@ class Estimator
 {
   public:
     Estimator();
+    ~Estimator();
 
     void setParameter();
 
@@ -57,6 +59,13 @@ class Estimator
     bool is_next_odometry_frame();
     void inputFisheyeImage(double t, const CvCudaImages & up_imgs, const CvCudaImages & down_imgs, bool is_blank_init = false);
     void inputFisheyeImage(double t, const CvImages & fisheye_imgs_up, const CvImages & fisheye_imgs_down);
+
+    // Loop closure support: cache the full-resolution left undistorted image
+    // keyed by its timestamp so pubKeyframe() can republish the exact image
+    // whose coordinates are sent to loop_fusion. Returns true if an image for
+    // time t (within a small tolerance) was found.
+    void cacheKeyframeImage(double t, const cv::Mat & left_undist_gray);
+    bool getKeyframeImage(double t, cv::Mat & out) const;
     void processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
     void processImage(const FeatureFrame &image, const double header);
     void processMeasurements();
@@ -65,6 +74,7 @@ class Estimator
 
     // internal
     void clearState();
+    void resetRuntimeState();
     bool initialStructure();
     bool visualInitialAlign();
     bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l);
@@ -153,6 +163,10 @@ class Estimator
     bool first_imu;
     bool is_valid, is_key;
     bool failure_occur;
+    int low_feature_frame_count = 0;
+    int failure_detection_warmup = 0;
+    int output_warmup_healthy_frames = 0;
+    int state_anomaly_frame_count = 0;
 
     vector<Vector3d> point_cloud;
     vector<Vector3d> margin_cloud;
@@ -198,5 +212,10 @@ class Estimator
     queue<std::vector<cv::Mat>> fisheye_imgs_upBuf;
     queue<std::vector<cv::Mat>> fisheye_imgs_downBuf;
     queue<std::pair<double, EigenPose>> odometry_buf;
+
+    // Loop closure: ring buffer of (timestamp, full-resolution left undistorted
+    // gray image) used by pubKeyframe() for loop_fusion.
+    mutable std::mutex kf_img_mutex;
+    std::deque<std::pair<double, cv::Mat>> kf_img_buf;
 
 };

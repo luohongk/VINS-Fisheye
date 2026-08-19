@@ -29,6 +29,16 @@ Estimator::Estimator(): f_manager{Rs}
     initFirstPoseFlag = false;
 }
 
+Estimator::~Estimator()
+{
+    if (trackThread.joinable())
+        trackThread.join();
+    if (processThread.joinable())
+        processThread.join();
+    if (depthThread.joinable())
+        depthThread.join();
+}
+
 void Estimator::setParameter()
 {
      if (FISHEYE) {
@@ -131,7 +141,35 @@ void Estimator::inputFisheyeImage(double t, const CvImages & fisheye_imgs_up,
    
 }
 
-void Estimator::inputFisheyeImage(double t, const CvCudaImages & fisheye_imgs_up_cuda, 
+void Estimator::cacheKeyframeImage(double t, const cv::Mat & left_undist_gray)
+{
+    cv::Mat gray;
+    if (left_undist_gray.channels() == 3) {
+        cv::cvtColor(left_undist_gray, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        gray = left_undist_gray.clone();
+    }
+    std::lock_guard<std::mutex> lock(kf_img_mutex);
+    kf_img_buf.emplace_back(t, gray);
+    // Keep a bounded history (covers the whole sliding window plus margin).
+    while (kf_img_buf.size() > 50) {
+        kf_img_buf.pop_front();
+    }
+}
+
+bool Estimator::getKeyframeImage(double t, cv::Mat & out) const
+{
+    std::lock_guard<std::mutex> lock(kf_img_mutex);
+    for (auto it = kf_img_buf.rbegin(); it != kf_img_buf.rend(); ++it) {
+        if (fabs(it->first - t) < 1e-3) {
+            out = it->second;
+            return !out.empty();
+        }
+    }
+    return false;
+}
+
+void Estimator::inputFisheyeImage(double t, const CvCudaImages & fisheye_imgs_up_cuda,
         const CvCudaImages & fisheye_imgs_down_cuda, bool is_blank_init)
 {
     static int img_track_count = 0;
@@ -218,47 +256,72 @@ void Estimator::inputFeature(double t, const FeatureFrame &featureFrame)
 bool Estimator::getIMUInterval(double t0, double t1, vector<pair<double, Eigen::Vector3d>> &accVector, 
                                 vector<pair<double, Eigen::Vector3d>> &gyrVector)
 {
-    if(accBuf.empty())
+    if (accBuf.empty() || gyrBuf.empty())
     {
         printf("not receive imu\n");
         return false;
     }
-    //printf("get imu from %f %f\n", t0, t1);
-    double t_ss = 0;
-    double t_s = 0;
-    double t_e = 0;
-    if(t1 <= accBuf.back().first)
-    {
-        t_ss = accBuf.front().first;
 
-        while (accBuf.front().first <= t0)
-        {
-            accBuf.pop();
-            gyrBuf.pop();
-        }
-
-        t_s = accBuf.front().first;
-        while (accBuf.front().first < t1)
-        {
-            t_e = accBuf.front().first;
-            accVector.push_back(accBuf.front());
-            accBuf.pop();
-            gyrVector.push_back(gyrBuf.front());
-            gyrBuf.pop();
-        }
-        accVector.push_back(accBuf.front());
-        gyrVector.push_back(gyrBuf.front());
-    }
-    else
+    if (!std::isfinite(t0) || !std::isfinite(t1) || t1 <= t0)
     {
-        printf("wait for imu\n");
+        ROS_WARN("Reject invalid IMU interval t0=%.9f t1=%.9f", t0, t1);
         return false;
     }
 
-    if (fabs(t_s - t0) > 0.01 || fabs(t_e - t1) > 0.01) {
-        ROS_WARN("IMU wrong sampling dt1 %f dts0 %fms dts %f dte %f\n", t1 - t0, t_ss - t0, t_s - t0, t_e - t0);
+    if (t1 > accBuf.back().first)
+        return false;
+
+    // A reset can be followed by delayed image callbacks whose timestamps are
+    // older than the first retained IMU sample. Integrating that future sample
+    // over the missing interval produces the multi-second fake dt seen in the
+    // crash log and immediately destroys the preintegration Jacobian.
+    constexpr double kMaxBoundaryGap = 0.02;
+    if (accBuf.front().first > t1 + kMaxBoundaryGap)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "Drop stale image interval [%.6f, %.6f]: earliest IMU is %.6f",
+                          t0, t1, accBuf.front().first);
+        return false;
     }
 
+    while (accBuf.size() > 1 && gyrBuf.size() > 1 && accBuf.front().first <= t0)
+    {
+        accBuf.pop();
+        gyrBuf.pop();
+    }
+
+    const double first_sample_time = accBuf.front().first;
+    while (accBuf.size() > 1 && gyrBuf.size() > 1 && accBuf.front().first < t1)
+    {
+        accVector.push_back(accBuf.front());
+        accBuf.pop();
+        gyrVector.push_back(gyrBuf.front());
+        gyrBuf.pop();
+    }
+
+    if (accBuf.empty() || gyrBuf.empty() || accBuf.front().first < t1)
+    {
+        accVector.clear();
+        gyrVector.clear();
+        return false;
+    }
+
+    accVector.push_back(accBuf.front());
+    gyrVector.push_back(gyrBuf.front());
+
+    const double last_sample_time = accVector.back().first;
+    if (first_sample_time - t0 > kMaxBoundaryGap ||
+        last_sample_time - t1 > kMaxBoundaryGap)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "Reject poorly bracketed IMU interval dt=%.3fms start_gap=%.3fms end_gap=%.3fms",
+                          (t1 - t0) * 1000.0,
+                          (first_sample_time - t0) * 1000.0,
+                          (last_sample_time - t1) * 1000.0);
+        accVector.clear();
+        gyrVector.clear();
+        return false;
+    }
 
     return true;
 }
@@ -305,11 +368,13 @@ void Estimator::processDepthGeneration() {
                 mBuf.unlock();
             }
             //Use imu propaget for depth cloud, this is for realtime peformance;
-            while(!IMUAvailable(t + td)) {
+            while(ros::ok() && !IMUAvailable(t + td)) {
                 printf("Depth wait for IMU ... \n");
                 std::chrono::milliseconds dura(5);
                 std::this_thread::sleep_for(dura);
             }
+            if (!ros::ok())
+                break;
 
             TicToc tic;
             if (USE_GPU) {
@@ -322,11 +387,13 @@ void Estimator::processDepthGeneration() {
                 ROS_INFO("Depth generation cost %fms", tic.toc());
             }
             
-            while(odometry_buf.size() == 0) {
+            while(ros::ok() && odometry_buf.size() == 0) {
                 //wait for odom
                 std::chrono::milliseconds dura(5);
                 std::this_thread::sleep_for(dura);
             }
+            if (!ros::ok())
+                break;
 
             //1e-3 is for avoiding floating error
             //First is older than this frame
@@ -374,7 +441,7 @@ void Estimator::processMeasurements()
 
     static int mea_track_count = 0;
     static double mea_sum_time = 0;
-    while (1)
+    while (ros::ok())
     {
         //printf("process measurments\n");
         TicToc t_process;
@@ -385,7 +452,7 @@ void Estimator::processMeasurements()
             feature = featureBuf.front();
 
             curTime = feature.first + td;
-            while(1)
+            while(ros::ok())
             {
                 if ((!USE_IMU  || IMUAvailable(feature.first + td)))
                     break;
@@ -396,16 +463,39 @@ void Estimator::processMeasurements()
                     std::this_thread::sleep_for(dura);
                 }
             }
+            if (!ros::ok())
+                break;
+            bool imu_interval_ok = true;
             mBuf.lock();
             if(USE_IMU) {
-                getIMUInterval(prevTime, curTime, accVector, gyrVector);
-                if (curTime - prevTime > 0.11 || accVector.size()/(curTime - prevTime ) < 350) {
-                    ROS_WARN("Long IMU dt %fms or wrong IMU rate %fms", curTime - prevTime, accVector.size()/(curTime - prevTime));
-                } 
+                if (prevTime < 0.0 && !accBuf.empty())
+                    prevTime = accBuf.front().first;
+                imu_interval_ok = getIMUInterval(prevTime, curTime, accVector, gyrVector);
+                if (imu_interval_ok)
+                {
+                    const double interval_dt = curTime - prevTime;
+                    const double sample_rate = interval_dt > 0.0
+                        ? static_cast<double>(accVector.size()) / interval_dt
+                        : 0.0;
+                    if (interval_dt > 0.11 || sample_rate < 0.5 * IMU_FREQ)
+                    {
+                        ROS_WARN("Long IMU interval %.3fms or low sample rate %.1fHz",
+                                 interval_dt * 1000.0, sample_rate);
+                    }
+                }
             }
 
             featureBuf.pop();
             mBuf.unlock();
+
+            if (USE_IMU && !imu_interval_ok)
+            {
+                // Drop stale queued images until their timestamps are covered
+                // by the retained IMU stream, then restart from its first
+                // available sample instead of integrating a fake long dt.
+                prevTime = -1.0;
+                continue;
+            }
 
             if(USE_IMU)
             {
@@ -433,14 +523,53 @@ void Estimator::processMeasurements()
             header.frame_id = "world";
             header.stamp = ros::Time(feature.first);
 
-            pubIMUBias(latest_Ba, latest_Bg, header);
-            //These cost 5ms, ~1/6 percent on manifold2
-            pubOdometry(*this, header);
-            pubKeyPoses(*this, header);
-            pubCameraPose(*this, header);
-            pubPointCloud(*this, header);
-            pubKeyframe(*this);
-            pubTF(*this, header);
+            // A newly initialized nonlinear solution can still be rejected by
+            // failureDetection() a few frames later (for example because the
+            // initial IMU bias is implausible). Publishing those transient
+            // poses creates a discontinuity in vio.csv and also inserts the
+            // failed local frame into loop_fusion before the estimator resets.
+            // Require a longer stable publishing warmup than the 15-frame
+            // failure-detection grace period, and suppress any frame currently
+            // carrying an anomaly streak.
+            constexpr int kOutputWarmupFrames = 30;
+            const bool nonlinear_healthy =
+                solver_flag == NON_LINEAR && state_anomaly_frame_count == 0;
+            if (output_warmup_healthy_frames < kOutputWarmupFrames)
+            {
+                if (nonlinear_healthy)
+                    ++output_warmup_healthy_frames;
+                else
+                    output_warmup_healthy_frames = 0;
+            }
+            const bool output_ready =
+                nonlinear_healthy &&
+                output_warmup_healthy_frames >= kOutputWarmupFrames;
+            if (nonlinear_healthy && !output_ready)
+            {
+                // Keep the first valid keyframes available for loop closure.
+                // Publishing them immediately would contaminate loop_fusion if
+                // this nonlinear initialization is rejected a few frames later,
+                // so hold complete message snapshots until the warmup succeeds.
+                bufferWarmupKeyframe(*this);
+            }
+            else if (!nonlinear_healthy)
+            {
+                clearWarmupKeyframes();
+            }
+            if (output_ready)
+            {
+                // Preserve timestamp order: buffered startup keyframes must
+                // reach loop_fusion before the current live keyframe.
+                flushWarmupKeyframes();
+                pubIMUBias(latest_Ba, latest_Bg, header);
+                //These cost 5ms, ~1/6 percent on manifold2
+                pubOdometry(*this, header);
+                pubKeyPoses(*this, header);
+                pubCameraPose(*this, header);
+                pubPointCloud(*this, header);
+                pubKeyframe(*this);
+                pubTF(*this, header);
+            }
 
             double dt = t_process.toc();
             mea_sum_time += dt;
@@ -537,6 +666,58 @@ void Estimator::clearState()
     f_manager.clearState();
 
     failure_occur = 0;
+    low_feature_frame_count = 0;
+    failure_detection_warmup = 0;
+    output_warmup_healthy_frames = 0;
+    state_anomaly_frame_count = 0;
+    last_R.setIdentity();
+    last_R0.setIdentity();
+    last_P.setZero();
+    last_P0.setZero();
+}
+
+void Estimator::resetRuntimeState()
+{
+    // Reuse the existing tracker and worker threads. Calling setParameter()
+    // during a reset would create a second tracker and overwrite a joinable
+    // std::thread, which terminates the process.
+    {
+        std::lock_guard<std::mutex> lock(mBuf);
+        // Keep the core IMU/feature queues synchronized across a solver reset.
+        // The current feature was already removed by processMeasurements();
+        // queued future features and IMUs remain timestamp ordered. Clearing
+        // these queues allowed delayed ROS image callbacks to re-enter several
+        // seconds behind a freshly filled IMU queue.
+        while (!fisheye_imgs_stampBuf.empty()) fisheye_imgs_stampBuf.pop();
+        while (!fisheye_imgs_upBuf_cuda.empty()) fisheye_imgs_upBuf_cuda.pop();
+        while (!fisheye_imgs_downBuf_cuda.empty()) fisheye_imgs_downBuf_cuda.pop();
+        while (!fisheye_imgs_upBuf.empty()) fisheye_imgs_upBuf.pop();
+        while (!fisheye_imgs_downBuf.empty()) fisheye_imgs_downBuf.pop();
+
+        clearState();
+        prevTime = -1.0;
+        curTime = -1.0;
+        initFirstPoseFlag = false;
+
+        for (int i = 0; i < NUM_OF_CAM; ++i)
+        {
+            tic[i] = TIC[i];
+            ric[i] = RIC[i];
+        }
+        td = TD;
+        g = G;
+        f_manager.ft = featureTracker;
+        f_manager.setRic(ric);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(odomBuf);
+        while (!odometry_buf.empty()) odometry_buf.pop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(kf_img_mutex);
+        kf_img_buf.clear();
+    }
 }
 
 void Estimator::processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity)
@@ -746,12 +927,8 @@ void Estimator::processImage(const FeatureFrame &image, const double header)
         if (failureDetection())
         {
             ROS_WARN("failure detection!");
-            failure_occur = 1;
-            clearState();
-            setParameter();
+            resetRuntimeState();
             ROS_WARN("system reboot!");
-            //exit(-1);
-            cv::waitKey(-1);
             return;
         }
 
@@ -822,6 +999,11 @@ bool Estimator::initialStructure()
     for (auto &_it : f_manager.feature)
     {
         auto & it_per_id = _it.second;
+        // GlobalSFM below reconstructs a single cam0 trajectory.  cam1-only
+        // tracks live in a different optical frame and must not be treated as
+        // if they were cam0 observations.
+        if (it_per_id.main_cam != 0)
+            continue;
         int imu_j = it_per_id.start_frame - 1;
         SFMFeature tmp_feature;
         tmp_feature.state = false;
@@ -830,9 +1012,19 @@ bool Estimator::initialStructure()
         {
             imu_j++;
             Vector3d pts_j = it_per_frame.point;
-            tmp_feature.observation.push_back(make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
+#ifdef UNIT_SPHERE_ERROR
+            if (std::abs(pts_j.z()) < 1e-6)
+                continue;
+            tmp_feature.observation.push_back(
+                make_pair(imu_j, Eigen::Vector2d{pts_j.x() / pts_j.z(),
+                                                 pts_j.y() / pts_j.z()}));
+#else
+            tmp_feature.observation.push_back(
+                make_pair(imu_j, Eigen::Vector2d{pts_j.x(), pts_j.y()}));
+#endif
         }
-        sfm_f.push_back(tmp_feature);
+        if (tmp_feature.observation.size() >= 2)
+            sfm_f.push_back(tmp_feature);
     } 
     Matrix3d relative_R;
     Vector3d relative_T;
@@ -886,13 +1078,23 @@ bool Estimator::initialStructure()
             int feature_id = id_pts.first;
             for (auto &i_p : id_pts.second)
             {
+                if (i_p.first != 0)
+                    continue;
                 it = sfm_tracked_points.find(feature_id);
                 if(it != sfm_tracked_points.end())
                 {
                     Vector3d world_pts = it->second;
+                    Vector3d bearing = i_p.second.head<3>();
+#ifdef UNIT_SPHERE_ERROR
+                    if (std::abs(bearing.z()) < 1e-6)
+                        continue;
+                    Vector2d img_pts(bearing.x() / bearing.z(),
+                                     bearing.y() / bearing.z());
+#else
+                    Vector2d img_pts = bearing.head<2>();
+#endif
                     cv::Point3f pts_3(world_pts(0), world_pts(1), world_pts(2));
                     pts_3_vector.push_back(pts_3);
-                    Vector2d img_pts = i_p.second.head<2>();
                     cv::Point2f pts_2(img_pts(0), img_pts(1));
                     pts_2_vector.push_back(pts_2);
                 }
@@ -1173,49 +1375,82 @@ void Estimator::double2vector()
 
 bool Estimator::failureDetection()
 {
-    return false;
-    if (f_manager.last_track_num < 2)
+    // The first nonlinear solutions establish the gravity-aligned world frame
+    // and can legitimately differ from the reset identity by ~180 degrees.
+    // Do not compare them with pre-initialization last_R/last_P or transient
+    // bias estimates.
+    // Keep this counter increasing after the failure-detection grace period.
+    // External publication uses a separate consecutive-healthy-frame counter
+    // so a transient anomaly cannot accidentally satisfy its warmup.
+    ++failure_detection_warmup;
+    if (failure_detection_warmup <= 15)
     {
-        ROS_INFO(" little feature %d", f_manager.last_track_num);
-        //return true;
+        state_anomaly_frame_count = 0;
+        return false;
     }
+
+    const int solve_features = f_manager.getFeatureCount();
+    if (solve_features < 5)
+        ++low_feature_frame_count;
+    else
+        low_feature_frame_count = 0;
+
+    if (low_feature_frame_count > 45)
+    {
+        ROS_WARN("visual constraints unavailable for %d consecutive frames",
+                 low_feature_frame_count);
+        return true;
+    }
+    Vector3d tmp_P = Ps[WINDOW_SIZE];
+    if (!tmp_P.allFinite() || !Vs[WINDOW_SIZE].allFinite() ||
+        !Bas[WINDOW_SIZE].allFinite() || !Bgs[WINDOW_SIZE].allFinite())
+    {
+        ROS_WARN("non-finite estimator state");
+        return true;
+    }
+
+    bool state_anomaly = false;
     if (Bas[WINDOW_SIZE].norm() > 2.5)
     {
-        ROS_INFO(" big IMU acc bias estimation %f", Bas[WINDOW_SIZE].norm());
-        return true;
+        ROS_WARN_THROTTLE(1.0, "large IMU acc bias estimate %.3f", Bas[WINDOW_SIZE].norm());
+        state_anomaly = true;
     }
     if (Bgs[WINDOW_SIZE].norm() > 1.0)
     {
-        ROS_INFO(" big IMU gyr bias estimation %f", Bgs[WINDOW_SIZE].norm());
-        return true;
+        ROS_WARN_THROTTLE(1.0, "large IMU gyro bias estimate %.3f", Bgs[WINDOW_SIZE].norm());
+        state_anomaly = true;
     }
-    /*
-    if (tic(0) > 1)
+    if (Vs[WINDOW_SIZE].norm() > 15.0)
     {
-        ROS_INFO(" big extri param estimation %d", tic(0) > 1);
-        return true;
+        ROS_WARN_THROTTLE(1.0, "implausible velocity %.3f m/s", Vs[WINDOW_SIZE].norm());
+        state_anomaly = true;
     }
-    */
-    Vector3d tmp_P = Ps[WINDOW_SIZE];
-    if ((tmp_P - last_P).norm() > 5)
+    if ((tmp_P - last_P).norm() > 3.0)
     {
-        //ROS_INFO(" big translation");
-        //return true;
-    }
-    if (abs(tmp_P.z() - last_P.z()) > 1)
-    {
-        //ROS_INFO(" big z translation");
-        //return true; 
+        ROS_WARN_THROTTLE(1.0, "implausible frame-to-frame translation %.3f m",
+                          (tmp_P - last_P).norm());
+        state_anomaly = true;
     }
     Matrix3d tmp_R = Rs[WINDOW_SIZE];
     Matrix3d delta_R = tmp_R.transpose() * last_R;
     Quaterniond delta_Q(delta_R);
     double delta_angle;
-    delta_angle = acos(delta_Q.w()) * 2.0 / 3.14 * 180.0;
+    delta_angle = acos(std::min(1.0, std::abs(delta_Q.normalized().w()))) * 2.0 * 180.0 / M_PI;
     if (delta_angle > 50)
     {
-        ROS_INFO(" big delta_angle ");
-        //return true;
+        ROS_WARN_THROTTLE(1.0, "implausible frame-to-frame rotation %.3f deg", delta_angle);
+        state_anomaly = true;
+    }
+
+    if (state_anomaly)
+        ++state_anomaly_frame_count;
+    else
+        state_anomaly_frame_count = 0;
+
+    if (state_anomaly_frame_count >= 3)
+    {
+        ROS_WARN("estimator state anomaly persisted for %d frames", state_anomaly_frame_count);
+        return true;
     }
     return false;
 }
@@ -1895,10 +2130,30 @@ void Estimator::updateLatestStates()
     queue<pair<double, Eigen::Vector3d>> tmp_accBuf = accBuf;
     queue<pair<double, Eigen::Vector3d>> tmp_gyrBuf = gyrBuf;
 
+    if (tmp_accBuf.empty() || tmp_gyrBuf.empty())
+    {
+        fast_prop_inited = false;
+        mBuf.unlock();
+        return;
+    }
+
     double re_propagate_dt = accBuf.back().first - latest_time;
 
     if (re_propagate_dt > 3.0/IMAGE_FREQ) {
         ROS_WARN("[updateLatestStates] Reprogate dt too high %4.1fms ", re_propagate_dt*1000);
+    }
+
+    // Fast high-rate prediction is optional. Replaying seconds of queued IMU
+    // when the image estimator is far behind can overflow the predicted state;
+    // leave it disabled until the optimized estimator catches up.
+    if (!std::isfinite(re_propagate_dt) || re_propagate_dt > 0.5)
+    {
+        ROS_WARN_THROTTLE(1.0,
+                          "[updateLatestStates] disable fast propagation for %.1fms backlog",
+                          re_propagate_dt * 1000.0);
+        fast_prop_inited = false;
+        mBuf.unlock();
+        return;
     }
 
     while(!tmp_accBuf.empty())
@@ -1906,6 +2161,12 @@ void Estimator::updateLatestStates()
         double t = tmp_accBuf.front().first;
         Eigen::Vector3d acc = tmp_accBuf.front().second;
         Eigen::Vector3d gyr = tmp_gyrBuf.front().second;
+        if (t <= latest_time)
+        {
+            tmp_accBuf.pop();
+            tmp_gyrBuf.pop();
+            continue;
+        }
         double dt = t - latest_time;
         if (WARN_IMU_DURATION && dt > 1.5/IMU_FREQ) {
             ROS_ERROR("[updateLatestStates]IMU sample duration too high %4.2fms. Check your IMU and system performance", dt*1000);

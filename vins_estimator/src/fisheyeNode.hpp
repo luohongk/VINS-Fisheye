@@ -27,8 +27,16 @@ class FisheyeFlattenHandler
 
     ros::Publisher flatten_gray_pub;
     ros::Publisher flatten_pub;
+    ros::Publisher raw_left_pub;
+    ros::Publisher raw_right_pub;
+    ros::Publisher raw_stereo_pub;
+    ros::Publisher undist_left_pub;
+    ros::Publisher undist_right_pub;
+    ros::Publisher undist_stereo_pub;
     std::vector<bool> mask_up, mask_down;
     ros::Time stamp;
+    cv::Mat full_top_map_l_1, full_top_map_l_2;
+    cv::Mat full_top_map_r_1, full_top_map_r_2;
 
     bool is_color = false;
 
@@ -48,6 +56,7 @@ class FisheyeFlattenHandler
         std::queue<CvImages> fisheye_buf_up_color, fisheye_buf_down_color;
 
         std::queue<double> fisheye_buf_t;
+        std::queue<cv::Mat> full_left_undist_gray_buf;
         //Only gray image will be saved in buf now
 
         CvCudaImages fisheye_up_imgs_cuda, fisheye_down_imgs_cuda;
@@ -67,11 +76,13 @@ class FisheyeFlattenHandler
         bool has_image_in_buffer();
 
         double pop_from_buffer(CvCudaImages & up_gray, CvCudaImages & down_gray,
-            CvCudaImages & up_color_gray, CvCudaImages & down_color_gray
+            CvCudaImages & up_color_gray, CvCudaImages & down_color_gray,
+            cv::Mat *full_left_undist_gray = nullptr
         );
         
         double pop_from_buffer(CvImages & up_gray, CvImages & down_gray,
-            CvImages & up_color_gray, CvImages & down_color_gray
+            CvImages & up_color_gray, CvImages & down_color_gray,
+            cv::Mat *full_left_undist_gray = nullptr
         );
 
         void setup_extrinsic(vins::FlattenImages & images, const Estimator & estimator);

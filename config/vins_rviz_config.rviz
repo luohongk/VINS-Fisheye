@@ -1,54 +1,7 @@
-Panels:
-  - Class: rviz/Displays
-    Help Height: 0
-    Name: Displays
-    Property Tree Widget:
-      Expanded:
-        - /Global Options1
-        - /Grid1
-        - /Axes1
-        - /LoopGroup1/loopPath1
-        - /VIOGroup1
-        - /VIOGroup1/PointCloud1
-        - /VIOGroup1/HistoryPointCloud1
-        - /GlobalGroup1/CarModel1
-        - /Odometry1/Shape1
-        - /DepthCloudAll1
-      Splitter Ratio: 0.5429141521453857
-    Tree Height: 230
-  - Class: rviz/Selection
-    Name: Selection
-  - Class: rviz/Tool Properties
-    Expanded:
-      - /2D Pose Estimate1
-      - /2D Nav Goal1
-      - /Publish Point1
-    Name: Tool Properties
-    Splitter Ratio: 0.5886790156364441
-  - Class: rviz/Views
-    Expanded:
-      - /Current View1
-    Name: Views
-    Splitter Ratio: 0.5
-  - Class: rviz/Time
-    Experimental: false
-    Name: Time
-    SyncMode: 0
-    SyncSource: PointCloud
-  - Class: rviz/Displays
-    Help Height: 138
-    Name: Displays
-    Property Tree Widget:
-      Expanded:
-        - /Global Options1
-        - /Odometry1
-        - /Odometry1/Shape1
-      Splitter Ratio: 0.5
-    Tree Height: 319
+Panels: []
 Preferences:
-  PromptSaveOnExit: true
-Toolbars:
-  toolButtonStyle: 2
+  PromptSaveOnExit: false
+Toolbars: {}
 Visualization Manager:
   Class: ""
   Displays:
@@ -77,6 +30,34 @@ Visualization Manager:
       Radius: 0.05000000074505806
       Reference Frame: <Fixed Frame>
       Value: false
+    - Class: rviz/Group
+      Displays:
+        - Class: rviz/Image
+          Enabled: true
+          Image Topic: /vins_estimator/fisheye/stereo/image_raw
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: fisheye_observation
+          Normalize Range: true
+          Queue Size: 2
+          Transport Hint: raw
+          Unreliable: false
+          Value: true
+        - Class: rviz/Image
+          Enabled: true
+          Image Topic: /vins_estimator/fisheye/stereo/image_undistorted
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: undistorted_observation
+          Normalize Range: true
+          Queue Size: 2
+          Transport Hint: raw
+          Unreliable: false
+          Value: true
+      Enabled: true
+      Name: ImageGroup
     - Class: rviz/Group
       Displays:
         - Class: rviz/MarkerArray
@@ -179,17 +160,17 @@ Visualization Manager:
           Use rainbow: true
           Value: false
         - Class: rviz/Image
-          Enabled: false
+          Enabled: true
           Image Topic: /loop_fusion/match_image
           Max Value: 1
           Median window: 5
           Min Value: 0
-          Name: loop_match_Image
+          Name: loop_match_image
           Normalize Range: true
           Queue Size: 2
           Transport Hint: raw
           Unreliable: false
-          Value: false
+          Value: true
       Enabled: true
       Name: LoopGroup
     - Class: rviz/Group
@@ -410,19 +391,6 @@ Visualization Manager:
   Name: root
   Tools:
     - Class: rviz/MoveCamera
-    - Class: rviz/Select
-    - Class: rviz/FocusCamera
-    - Class: rviz/Measure
-    - Class: rviz/SetInitialPose
-      Theta std deviation: 0.2617993950843811
-      Topic: /initialpose
-      X std deviation: 0.5
-      Y std deviation: 0.5
-    - Class: rviz/SetGoal
-      Topic: /move_base_simple/goal
-    - Class: rviz/PublishPoint
-      Single click: true
-      Topic: /clicked_point
   Value: true
   Views:
     Current:
@@ -448,22 +416,16 @@ Visualization Manager:
       Yaw: 2.9702155590057373
     Saved: ~
 Window Geometry:
-  Displays:
-    collapsed: false
-  Height: 311
+  Height: 950
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000014d00000113fc0200000013fb000000100044006900730070006c006100790073000000000e000001130000007500fffffffb0000000a0049006d0061006700650100000016000001d30000000000000000fb0000001200530065006c0065006300740069006f006e0000000028000003990000003a00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000017900000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001200720061007700200049006d0061006700650000000028000000300000000000000000fb00000012007200610077005f0069006d0061006700650000000028000000f90000000000000000fb0000001a0074007200610063006b0065006400200069006d0061006700650000000028000001d50000000000000000fb00000020006c006f006f0070005f006d0061007400630068005f0069006d0061006700650000000192000000d60000000000000000fb000000100044006900730070006c00610079007300000000160000019b0000007500fffffffc000000280000011e0000000000fffffffa000000000100000002fb0000001200720061007700200049006d0061006700650000000000ffffffff0000000000000000fb0000001a0074007200610063006b0065006400200069006d0061006700650100000000000002370000000000000000fb0000001000410052005f0069006d0061006700650100000373000000160000000000000000fb0000001200720061007700200069006d006100670065010000038f000000160000000000000000fb00000020006c006f006f0070005f006d0061007400630068005f0049006d0061006700650000000027000003420000001600fffffffb0000000a0049006d0061006700650000000000ffffffff000000000000000000000001000000ad0000019bfc0200000004fc000000160000019b0000000000fffffffa000000000100000002fb0000000a0049006d0061006700650000000000ffffffff0000000000000000fb0000000a0049006d006100670065000000027d000000ad0000000000000000fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a0056006900650077007300000000160000019b0000006e00fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b20000000000000000000000020000043800000158fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000005710000005afc0100000002fb0000000800540069006d00650000000000000005710000017e00fffffffb0000000800540069006d00650100000000000004500000000000000000000002650000011300000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
-  Selection:
+  QMainWindow State: 000000ff00000000fd000000020000000000000208000003bcfc0200000002fb000000260066006900730068006500790065005f006f00620073006500720076006100740069006f006e0100000000000001db0000002c00fffffffb0000002e0075006e0064006900730074006f0072007400650064005f006f00620073006500720076006100740069006f006e0100000000000001db0000002c00ffffff000000020000043800000118fc0100000001fb00000020006c006f006f0070005f006d0061007400630068005f0069006d006100670065010000000000000438000000a000ffffff000000000000000000000001000000040000000100000008fc00000000
+  Width: 1600
+  X: 80
+  Y: 40
+  fisheye_observation:
     collapsed: false
-  Time:
+  loop_match_image:
     collapsed: false
-  Tool Properties:
-    collapsed: false
-  Views:
-    collapsed: false
-  Width: 613
-  X: 388
-  Y: 33
-  loop_match_Image:
+  undistorted_observation:
     collapsed: false

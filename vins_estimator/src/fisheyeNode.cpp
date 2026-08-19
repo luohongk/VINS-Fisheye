@@ -4,8 +4,126 @@
 #include "estimator/estimator.h"
 #include "estimator/parameters.h"
 #include "depth_generation/depth_camera_manager.h"
+#include <std_msgs/Header.h>
 
 using namespace FeatureTracker;     
+
+namespace
+{
+constexpr size_t MAX_FISHEYE_BUFFER_SIZE = 5;
+constexpr int STEREO_SYNC_QUEUE_SIZE = 800;
+
+template <typename QueueT>
+void popIfNotEmpty(QueueT &queue)
+{
+    if (!queue.empty())
+        queue.pop();
+}
+}
+
+static bool cudaPipelineSmokeTest()
+{
+#ifdef USE_CUDA
+    try {
+        const int device_count = cv::cuda::getCudaEnabledDeviceCount();
+        if (device_count <= 0) {
+            ROS_WARN("[cuda] No CUDA-enabled device found.");
+            return false;
+        }
+
+        cv::cuda::setDevice(0);
+
+        cv::Mat host(32, 32, CV_8UC1, cv::Scalar(0));
+        cv::Mat map_x(host.size(), CV_32FC1);
+        cv::Mat map_y(host.size(), CV_32FC1);
+        for (int y = 0; y < host.rows; ++y) {
+            for (int x = 0; x < host.cols; ++x) {
+                map_x.at<float>(y, x) = (float)x;
+                map_y.at<float>(y, x) = (float)y;
+            }
+        }
+
+        cv::cuda::GpuMat gpu;
+        cv::cuda::GpuMat map_x_gpu;
+        cv::cuda::GpuMat map_y_gpu;
+        cv::cuda::GpuMat remapped;
+        cv::cuda::GpuMat pyramid;
+
+        gpu.upload(host);
+        map_x_gpu.upload(map_x);
+        map_y_gpu.upload(map_y);
+        cv::cuda::remap(gpu, remapped, map_x_gpu, map_y_gpu, cv::INTER_LINEAR);
+        cv::cuda::pyrDown(remapped, pyramid);
+        cv::cuda::Stream::Null().waitForCompletion();
+        return true;
+    } catch (const cv::Exception &e) {
+        ROS_WARN_STREAM("[cuda] Smoke test failed: " << e.what());
+        return false;
+    }
+#else
+    return false;
+#endif
+}
+
+static void publishMatImage(const ros::Publisher &pub, const ros::Time &stamp,
+        const std::string &frame_id, const cv::Mat &image)
+{
+    if (pub.getNumSubscribers() == 0 || image.empty())
+        return;
+
+    std_msgs::Header header;
+    header.stamp = stamp;
+    header.frame_id = frame_id;
+    const std::string encoding = image.channels() == 1 ? "mono8" : "bgr8";
+    pub.publish(cv_bridge::CvImage(header, encoding, image).toImageMsg());
+}
+
+static cv::Mat sideBySideImage(const cv::Mat &left, const cv::Mat &right)
+{
+    if (left.empty())
+        return right.clone();
+    if (right.empty())
+        return left.clone();
+
+    cv::Mat l = left;
+    cv::Mat r = right;
+    cv::Mat l_view, r_view;
+
+    if (l.channels() != r.channels()) {
+        if (l.channels() == 1)
+            cv::cvtColor(l, l_view, cv::COLOR_GRAY2BGR);
+        else
+            l_view = l;
+        if (r.channels() == 1)
+            cv::cvtColor(r, r_view, cv::COLOR_GRAY2BGR);
+        else
+            r_view = r;
+    } else {
+        l_view = l;
+        r_view = r;
+    }
+
+    cv::Mat r_resized;
+    if (r_view.rows != l_view.rows) {
+        const double scale = (double)l_view.rows / (double)r_view.rows;
+        cv::resize(r_view, r_resized, cv::Size((int)(r_view.cols * scale), l_view.rows));
+    } else {
+        r_resized = r_view;
+    }
+
+    cv::Mat out;
+    cv::hconcat(l_view, r_resized, out);
+    return out;
+}
+
+static void publishStereoMatImage(const ros::Publisher &pub, const ros::Time &stamp,
+        const std::string &frame_id, const cv::Mat &left, const cv::Mat &right)
+{
+    if (pub.getNumSubscribers() == 0)
+        return;
+    publishMatImage(pub, stamp, frame_id, sideBySideImage(left, right));
+}
+
 FisheyeFlattenHandler::FisheyeFlattenHandler(ros::NodeHandle & n, bool _is_color): mask_up(5, 0), mask_down(5, 0), is_color(_is_color)
 {
 
@@ -13,6 +131,23 @@ FisheyeFlattenHandler::FisheyeFlattenHandler(ros::NodeHandle & n, bool _is_color
 
     flatten_pub = n.advertise<vins::FlattenImages>("/vins_estimator/flattened_raw", 1);
     flatten_gray_pub = n.advertise<vins::FlattenImages>("/vins_estimator/flattened_gray", 1);
+    raw_left_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/left/image_raw", 1);
+    raw_right_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/right/image_raw", 1);
+    raw_stereo_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/stereo/image_raw", 1);
+    undist_left_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/left/image_undistorted", 1);
+    undist_right_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/right/image_undistorted", 1);
+    undist_stereo_pub = n.advertise<sensor_msgs::Image>("/vins_estimator/fisheye/stereo/image_undistorted", 1);
+
+    if (fisheys_undists.size() >= 2) {
+        fisheys_undists[0].initFullTopUndistortRectifyMap(full_top_map_l_1, full_top_map_l_2);
+        fisheys_undists[1].initFullTopUndistortRectifyMap(full_top_map_r_1, full_top_map_r_2);
+        ROS_INFO("[VINS-DBG][full_undist] size=%dx%d f=%.3f cx=%.1f cy=%.1f",
+            fisheys_undists[0].rawSize().width,
+            fisheys_undists[0].rawSize().height,
+            fisheys_undists[0].fullTopFocal(),
+            fisheys_undists[0].raw_width / 2.0,
+            fisheys_undists[0].raw_height / 2.0);
+    }
 
     if (enable_up_top) {
         mask_up[0] = true;        
@@ -74,6 +209,38 @@ void FisheyeFlattenHandler::imgs_callback(double t, const cv::Mat & img1, const 
     }
 
     TicToc t_f;
+    const ros::Time img_stamp(t);
+    cv::Mat full_left_undist_gray;
+
+    if (!is_blank_init) {
+        publishMatImage(raw_left_pub, img_stamp, "fisheye_left", img1);
+        publishMatImage(raw_right_pub, img_stamp, "fisheye_right", img2);
+        publishStereoMatImage(raw_stereo_pub, img_stamp, "fisheye_stereo", img1, img2);
+
+        const bool need_full_undist =
+            pub_keyframe_image.getNumSubscribers() > 0 ||
+            undist_left_pub.getNumSubscribers() > 0 ||
+            undist_right_pub.getNumSubscribers() > 0 ||
+            undist_stereo_pub.getNumSubscribers() > 0;
+
+        if (need_full_undist && !full_top_map_l_1.empty() && !full_top_map_r_1.empty()) {
+            cv::Mat full_left_undist;
+            cv::Mat full_right_undist;
+            fisheys_undists[0].undistortFullTop(img1, full_left_undist, full_top_map_l_1, full_top_map_l_2);
+            fisheys_undists[1].undistortFullTop(img2, full_right_undist, full_top_map_r_1, full_top_map_r_2);
+
+            publishMatImage(undist_left_pub, img_stamp, "fisheye_left_undistorted", full_left_undist);
+            publishMatImage(undist_right_pub, img_stamp, "fisheye_right_undistorted", full_right_undist);
+            publishStereoMatImage(undist_stereo_pub, img_stamp, "fisheye_stereo_undistorted",
+                full_left_undist, full_right_undist);
+
+            if (full_left_undist.channels() == 3) {
+                cv::cvtColor(full_left_undist, full_left_undist_gray, cv::COLOR_BGR2GRAY);
+            } else {
+                full_left_undist_gray = full_left_undist.clone();
+            }
+        }
+    }
 
     if (USE_GPU) {
         // is_color = true;
@@ -114,6 +281,22 @@ void FisheyeFlattenHandler::imgs_callback(double t, const cv::Mat & img1, const 
                 fisheye_cuda_buf_up_color.push(fisheye_up_imgs_cuda);
                 fisheye_cuda_buf_down_color.push(fisheye_down_imgs_cuda);
             }
+            full_left_undist_gray_buf.push(full_left_undist_gray);
+            size_t dropped = 0;
+            while (fisheye_buf_t.size() > MAX_FISHEYE_BUFFER_SIZE) {
+                fisheye_buf_t.pop();
+                popIfNotEmpty(fisheye_cuda_buf_up);
+                popIfNotEmpty(fisheye_cuda_buf_down);
+                popIfNotEmpty(full_left_undist_gray_buf);
+                if (is_color) {
+                    popIfNotEmpty(fisheye_cuda_buf_up_color);
+                    popIfNotEmpty(fisheye_cuda_buf_down_color);
+                }
+                dropped++;
+            }
+            if (dropped > 0) {
+                ROS_WARN_THROTTLE(2.0, "[fisheye_buffer] dropped %zu stale frames; processing is behind input", dropped);
+            }
             buf_lock.unlock();
         }
     } else {
@@ -153,6 +336,22 @@ void FisheyeFlattenHandler::imgs_callback(double t, const cv::Mat & img1, const 
             fisheye_buf_up_color.push(fisheye_up_imgs);
             fisheye_buf_down_color.push(fisheye_down_imgs);
         }
+        full_left_undist_gray_buf.push(full_left_undist_gray);
+        size_t dropped = 0;
+        while (fisheye_buf_t.size() > MAX_FISHEYE_BUFFER_SIZE) {
+            fisheye_buf_t.pop();
+            popIfNotEmpty(fisheye_buf_up);
+            popIfNotEmpty(fisheye_buf_down);
+            popIfNotEmpty(full_left_undist_gray_buf);
+            if (is_color) {
+                popIfNotEmpty(fisheye_buf_up_color);
+                popIfNotEmpty(fisheye_buf_down_color);
+            }
+            dropped++;
+        }
+        if (dropped > 0) {
+            ROS_WARN_THROTTLE(2.0, "[fisheye_buffer] dropped %zu stale frames; processing is behind input", dropped);
+        }
 
         buf_lock.unlock();
     }
@@ -171,13 +370,17 @@ bool FisheyeFlattenHandler::has_image_in_buffer() {
 
 double FisheyeFlattenHandler::pop_from_buffer(
             CvCudaImages & up_gray, CvCudaImages & down_gray,
-            CvCudaImages & up_color, CvCudaImages & down_color) {
+            CvCudaImages & up_color, CvCudaImages & down_color,
+            cv::Mat *full_left_undist_gray) {
     if (USE_GPU) {
         buf_lock.lock();
         if (fisheye_buf_t.size() > 0) {
             auto t = fisheye_buf_t.front();
             up_gray = fisheye_cuda_buf_up.front();
             down_gray = fisheye_cuda_buf_down.front();
+            if (full_left_undist_gray && !full_left_undist_gray_buf.empty()) {
+                *full_left_undist_gray = full_left_undist_gray_buf.front();
+            }
 
             if(is_color) {
                 up_color = fisheye_cuda_buf_up_color.front();
@@ -188,6 +391,9 @@ double FisheyeFlattenHandler::pop_from_buffer(
             fisheye_buf_t.pop();
             fisheye_cuda_buf_up.pop();
             fisheye_cuda_buf_down.pop();
+            if (!full_left_undist_gray_buf.empty()) {
+                full_left_undist_gray_buf.pop();
+            }
 
             if(is_color) {
                 fisheye_cuda_buf_up_color.pop();
@@ -203,7 +409,8 @@ double FisheyeFlattenHandler::pop_from_buffer(
 
 double FisheyeFlattenHandler::pop_from_buffer(
             CvImages & up_gray, CvImages & down_gray,
-            CvImages & up_color, CvImages & down_color) {
+            CvImages & up_color, CvImages & down_color,
+            cv::Mat *full_left_undist_gray) {
     if(!USE_GPU) {
         buf_lock.lock();
         if (fisheye_buf_t.size() > 0) {
@@ -211,6 +418,9 @@ double FisheyeFlattenHandler::pop_from_buffer(
 
             up_gray = fisheye_buf_up.front();
             down_gray = fisheye_buf_down.front();
+            if (full_left_undist_gray && !full_left_undist_gray_buf.empty()) {
+                *full_left_undist_gray = full_left_undist_gray_buf.front();
+            }
 
             if(is_color) {
                 up_color = fisheye_buf_up_color.front();
@@ -220,6 +430,9 @@ double FisheyeFlattenHandler::pop_from_buffer(
             fisheye_buf_t.pop();
             fisheye_buf_up.pop();
             fisheye_buf_down.pop();
+            if (!full_left_undist_gray_buf.empty()) {
+                full_left_undist_gray_buf.pop();
+            }
 
             if(is_color) {
                 fisheye_buf_up_color.pop();
@@ -361,7 +574,7 @@ void FisheyeFlattenHandler::readIntrinsicParameter(const vector<string> &calib_f
     {
         if (FISHEYE) {
             ROS_INFO("Flatten read fisheye %s, id %ld", calib_file[i].c_str(), i);
-            FisheyeUndist un(calib_file[i].c_str(), i, FISHEYE_FOV, true, WIDTH);
+            FisheyeUndist un(calib_file[i].c_str(), i, FISHEYE_FOV, USE_GPU, WIDTH);
             fisheys_undists.push_back(un);
         }
     }
@@ -393,13 +606,15 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
     TicToc t0;
     if (fisheye_handler->has_image_in_buffer()) {
         pack_and_send_mtx.lock();
+        cv::Mat full_left_undist_gray;
 
         if (USE_GPU) {
             cur_frame_t = fisheye_handler->pop_from_buffer(
                 cur_up_gray_cuda,
                 cur_down_gray_cuda,
                 cur_up_color_cuda,
-                cur_down_color_cuda
+                cur_down_color_cuda,
+                &full_left_undist_gray
             );
 
             bool is_odometry_frame = estimator.is_next_odometry_frame();
@@ -407,13 +622,17 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
             if (is_odometry_frame) {
                 need_to_pack_and_send = true;
             }
+            if (!full_left_undist_gray.empty()) {
+                estimator.cacheKeyframeImage(cur_frame_t, full_left_undist_gray);
+            }
             estimator.inputFisheyeImage(cur_frame_t, cur_up_gray_cuda, cur_down_gray_cuda);
         } else {
             cur_frame_t = fisheye_handler->pop_from_buffer(
                 cur_up_gray,
                 cur_down_gray,
                 cur_up_color,
-                cur_down_color
+                cur_down_color,
+                &full_left_undist_gray
             );
 
             bool is_odometry_frame = estimator.is_next_odometry_frame();
@@ -431,6 +650,9 @@ void VinsNodeBaseClass::processFlattened(const ros::TimerEvent & e) {
                 cur_down_gray.empty() ? 0 : cur_down_gray[0].cols,
                 cur_down_gray.empty() ? 0 : cur_down_gray[0].rows,
                 int(is_odometry_frame), cur_frame_t);
+            if (!full_left_undist_gray.empty()) {
+                estimator.cacheKeyframeImage(cur_frame_t, full_left_undist_gray);
+            }
             estimator.inputFisheyeImage(cur_frame_t, cur_up_gray, cur_down_gray);
         }
         double t_0 = t0.toc();
@@ -511,8 +733,7 @@ void VinsNodeBaseClass::restart_callback(const std_msgs::BoolConstPtr &restart_m
     if (restart_msg->data == true)
     {
         ROS_WARN("restart the estimator!");
-        estimator.clearState();
-        estimator.setParameter();
+        estimator.resetRuntimeState();
     }
     return;
 }
@@ -527,6 +748,11 @@ void VinsNodeBaseClass::Init(ros::NodeHandle & n)
     
     std::cout << "config file is " << config_file << '\n';
     readParameters(config_file);
+
+    if (USE_GPU && !cudaPipelineSmokeTest()) {
+        ROS_WARN("Configured use_gpu=1, but this OpenCV/CUDA build cannot run on the current device. Falling back to CPU/OpenMP.");
+        USE_GPU = 0;
+    }
 
     estimator.setParameter();
 
@@ -562,7 +788,7 @@ void VinsNodeBaseClass::Init(ros::NodeHandle & n)
     //We use blank images to initialize cuda before every thing
     if (USE_GPU) {
         TicToc blank;
-        cv::Mat mat(fisheye_handler->raw_width(), fisheye_handler->raw_height(), CV_8UC3);
+        cv::Mat mat(fisheye_handler->raw_height(), fisheye_handler->raw_width(), CV_8UC3);
         fisheye_handler->imgs_callback(0, mat, mat, true);
             estimator.inputFisheyeImage(0, 
             fisheye_handler->fisheye_up_imgs_cuda_gray, fisheye_handler->fisheye_down_imgs_cuda_gray, true);
@@ -574,9 +800,9 @@ void VinsNodeBaseClass::Init(ros::NodeHandle & n)
 
     if (IS_COMP_IMAGES) {
         ROS_INFO("Will directly receive compressed images %s and %s", COMP_IMAGE0_TOPIC.c_str(), COMP_IMAGE1_TOPIC.c_str());
-        comp_image_sub_l = new message_filters::Subscriber<sensor_msgs::CompressedImage> (n, COMP_IMAGE0_TOPIC, 1000, ros::TransportHints().tcpNoDelay(true));
-        comp_image_sub_r = new message_filters::Subscriber<sensor_msgs::CompressedImage> (n, COMP_IMAGE1_TOPIC, 1000, ros::TransportHints().tcpNoDelay(true));
-        comp_sync = new message_filters::TimeSynchronizer<sensor_msgs::CompressedImage, sensor_msgs::CompressedImage> (*comp_image_sub_l, *comp_image_sub_r, 1000);
+        comp_image_sub_l = new message_filters::Subscriber<sensor_msgs::CompressedImage> (n, COMP_IMAGE0_TOPIC, STEREO_SYNC_QUEUE_SIZE, ros::TransportHints().tcpNoDelay(true));
+        comp_image_sub_r = new message_filters::Subscriber<sensor_msgs::CompressedImage> (n, COMP_IMAGE1_TOPIC, STEREO_SYNC_QUEUE_SIZE, ros::TransportHints().tcpNoDelay(true));
+        comp_sync = new message_filters::TimeSynchronizer<sensor_msgs::CompressedImage, sensor_msgs::CompressedImage> (*comp_image_sub_l, *comp_image_sub_r, STEREO_SYNC_QUEUE_SIZE);
         if (FISHEYE) {
             comp_sync->registerCallback(boost::bind(&VinsNodeBaseClass::fisheye_comp_imgs_callback, (VinsNodeBaseClass*)this, _1, _2));
         } else {    
@@ -584,9 +810,9 @@ void VinsNodeBaseClass::Init(ros::NodeHandle & n)
         }
     } else {
         ROS_INFO("Will directly receive raw images %s and %s", IMAGE0_TOPIC.c_str(), IMAGE1_TOPIC.c_str());
-        image_sub_l = new message_filters::Subscriber<sensor_msgs::Image> (n, IMAGE0_TOPIC, 1000, ros::TransportHints().tcpNoDelay(true));
-        image_sub_r = new message_filters::Subscriber<sensor_msgs::Image> (n, IMAGE1_TOPIC, 1000, ros::TransportHints().tcpNoDelay(true));
-        sync = new message_filters::TimeSynchronizer<sensor_msgs::Image, sensor_msgs::Image> (*image_sub_l, *image_sub_r, 1000);
+        image_sub_l = new message_filters::Subscriber<sensor_msgs::Image> (n, IMAGE0_TOPIC, STEREO_SYNC_QUEUE_SIZE, ros::TransportHints().tcpNoDelay(true));
+        image_sub_r = new message_filters::Subscriber<sensor_msgs::Image> (n, IMAGE1_TOPIC, STEREO_SYNC_QUEUE_SIZE, ros::TransportHints().tcpNoDelay(true));
+        sync = new message_filters::TimeSynchronizer<sensor_msgs::Image, sensor_msgs::Image> (*image_sub_l, *image_sub_r, STEREO_SYNC_QUEUE_SIZE);
         if (FISHEYE) {
             sync->registerCallback(boost::bind(&VinsNodeBaseClass::fisheye_imgs_callback, (VinsNodeBaseClass*)this, _1, _2));
         } else {    

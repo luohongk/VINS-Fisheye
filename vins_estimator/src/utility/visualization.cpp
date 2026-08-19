@@ -12,7 +12,13 @@
 #include <sensor_msgs/PointCloud.h>
 #include <vins/FlattenImages.h>
 #include "cv_bridge/cv_bridge.h"
+#include <camodocal/camera_models/CameraFactory.h>
 #include "../utility/ros_utility.h"
+#include <algorithm>
+#include <cmath>
+#include <deque>
+#include <mutex>
+#include <utility>
 
 using namespace ros;
 using namespace Eigen;
@@ -29,6 +35,7 @@ nav_msgs::Path path;
 ros::Publisher pub_flatten_images;
 ros::Publisher pub_keyframe_pose;
 ros::Publisher pub_keyframe_point;
+ros::Publisher pub_keyframe_image;
 ros::Publisher pub_extrinsic;
 ros::Publisher pub_viokeyframe;
 ros::Publisher pub_viononkeyframe;
@@ -39,6 +46,42 @@ static double sum_of_path = 0;
 static Vector3d last_path(0.0, 0.0, 0.0);
 
 size_t pub_counter = 0;
+
+namespace
+{
+struct KeyframePublication
+{
+    nav_msgs::Odometry pose;
+    sensor_msgs::PointCloud points;
+    vins::VIOKeyframe vio_keyframe;
+    sensor_msgs::Image image;
+    bool has_image = false;
+};
+
+std::deque<KeyframePublication> warmup_keyframes;
+std::mutex warmup_keyframes_mutex;
+constexpr size_t kMaxWarmupKeyframes = 64;
+}
+
+static camodocal::CameraPtr loopFusionCamera(int camera_id)
+{
+    static std::vector<camodocal::CameraPtr> cameras;
+    if (cameras.size() < CAM_NAMES.size())
+        cameras.resize(CAM_NAMES.size());
+    if (camera_id < 0 || camera_id >= (int)CAM_NAMES.size())
+        return camodocal::CameraPtr();
+    if (!cameras[camera_id])
+    {
+        cameras[camera_id] = camodocal::CameraFactory::instance()
+            ->generateCameraFromYamlFile(CAM_NAMES[camera_id]);
+        if (cameras[camera_id])
+            ROS_INFO("[loop_fusion_image_model] raw EUCM cam%d %dx%d", camera_id,
+                cameras[camera_id]->imageWidth(), cameras[camera_id]->imageHeight());
+        else
+            ROS_ERROR_STREAM("Failed to load raw loop camera " << CAM_NAMES[camera_id]);
+    }
+    return cameras[camera_id];
+}
 
 void registerPub(ros::NodeHandle &n)
 {
@@ -55,6 +98,7 @@ void registerPub(ros::NodeHandle &n)
     pub_camera_pose_visual = n.advertise<visualization_msgs::MarkerArray>("camera_pose_visual", 1000);
     pub_keyframe_pose = n.advertise<nav_msgs::Odometry>("keyframe_pose", 1000);
     pub_keyframe_point = n.advertise<sensor_msgs::PointCloud>("keyframe_point", 1000);
+    pub_keyframe_image = n.advertise<sensor_msgs::Image>("keyframe_image", 1000);
     pub_extrinsic = n.advertise<nav_msgs::Odometry>("extrinsic", 1000);
     pub_viokeyframe = n.advertise<vins::VIOKeyframe>("viokeyframe", 1000);
     pub_viononkeyframe = n.advertise<vins::VIOKeyframe>("viononkeyframe", 1000);
@@ -499,112 +543,224 @@ void pubTF(const Estimator &estimator, const std_msgs::Header &header)
 
 }
 
+namespace
+{
+bool buildKeyframePublication(const Estimator &estimator, KeyframePublication &publication)
+{
+    if (estimator.solver_flag != Estimator::SolverFlag::NON_LINEAR ||
+        estimator.marginalization_flag != 0)
+        return false;
+
+    const int keyframe_index = WINDOW_SIZE - 2;
+    const Vector3d P = estimator.Ps[keyframe_index];
+    const Quaterniond R(estimator.Rs[keyframe_index]);
+    nav_msgs::Odometry &odometry = publication.pose;
+    sensor_msgs::PointCloud &point_cloud = publication.points;
+    vins::VIOKeyframe &vkf = publication.vio_keyframe;
+
+    odometry.header.stamp = ros::Time(estimator.Headers[keyframe_index]);
+    odometry.header.frame_id = "world";
+    odometry.pose.pose.position.x = P.x();
+    odometry.pose.pose.position.y = P.y();
+    odometry.pose.pose.position.z = P.z();
+    odometry.pose.pose.orientation.x = R.x();
+    odometry.pose.pose.orientation.y = R.y();
+    odometry.pose.pose.orientation.z = R.z();
+    odometry.pose.pose.orientation.w = R.w();
+
+    const Vector3d P_r = P + R * estimator.tic[0];
+    Quaterniond R_r(R * estimator.ric[0]);
+    R_r.normalize();
+    vkf.pose_cam.position.x = P_r.x();
+    vkf.pose_cam.position.y = P_r.y();
+    vkf.pose_cam.position.z = P_r.z();
+    vkf.pose_cam.orientation.x = R_r.x();
+    vkf.pose_cam.orientation.y = R_r.y();
+    vkf.pose_cam.orientation.z = R_r.z();
+    vkf.pose_cam.orientation.w = R_r.w();
+
+    vkf.camera_extrisinc.position.x = estimator.tic[0].x();
+    vkf.camera_extrisinc.position.y = estimator.tic[0].y();
+    vkf.camera_extrisinc.position.z = estimator.tic[0].z();
+    Quaterniond ric(estimator.ric[0]);
+    ric.normalize();
+    vkf.camera_extrisinc.orientation.x = ric.x();
+    vkf.camera_extrisinc.orientation.y = ric.y();
+    vkf.camera_extrisinc.orientation.z = ric.z();
+    vkf.camera_extrisinc.orientation.w = ric.w();
+    vkf.pose_drone = odometry.pose.pose;
+    vkf.header.stamp = odometry.header.stamp;
+
+    point_cloud.header.stamp = odometry.header.stamp;
+    point_cloud.header.frame_id = "world";
+    for (const auto &_it : estimator.f_manager.feature)
+    {
+        const auto &it_per_id = _it.second;
+        const int frame_size = it_per_id.feature_per_frame.size();
+        if (it_per_id.start_frame >= keyframe_index ||
+            it_per_id.start_frame + frame_size - 1 < keyframe_index ||
+            it_per_id.solve_flag >= 2)
+            continue;
+
+        const int imu_j = keyframe_index - it_per_id.start_frame;
+        const int imu_i = it_per_id.start_frame;
+        const Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
+        const Vector3d w_pts_i =
+            estimator.Rs[imu_i] *
+                (estimator.ric[it_per_id.main_cam] * pts_i + estimator.tic[it_per_id.main_cam]) +
+            estimator.Ps[imu_i];
+        const FeaturePerFrame &frame_observation = it_per_id.feature_per_frame[imu_j];
+        auto append_observation = [&](int camera_id, const Vector3d &bearing)
+        {
+            const camodocal::CameraPtr loop_camera = loopFusionCamera(camera_id);
+            if (!loop_camera || !bearing.allFinite() || bearing.norm() < 1e-8)
+                return;
+
+            Eigen::Vector2d raw_pixel;
+            loop_camera->spaceToPlane(bearing, raw_pixel);
+            if (!raw_pixel.allFinite() || raw_pixel.x() < 0.0 ||
+                raw_pixel.x() >= loop_camera->imageWidth() || raw_pixel.y() < 0.0 ||
+                raw_pixel.y() >= loop_camera->imageHeight())
+                return;
+
+            const double safe_z = fabs(bearing.z()) > 1e-8 ? bearing.z() :
+                (bearing.z() >= 0.0 ? 1e-8 : -1e-8);
+            geometry_msgs::Point32 p;
+            p.x = w_pts_i.x();
+            p.y = w_pts_i.y();
+            p.z = w_pts_i.z();
+            point_cloud.points.push_back(p);
+            vkf.feature_points_3d.push_back(p);
+
+            sensor_msgs::ChannelFloat32 p_2d;
+            p_2d.values.push_back(bearing.x() / safe_z);
+            p_2d.values.push_back(bearing.y() / safe_z);
+            p_2d.values.push_back(raw_pixel.x());
+            p_2d.values.push_back(raw_pixel.y());
+            p_2d.values.push_back(it_per_id.feature_id);
+            p_2d.values.push_back(camera_id);
+            p_2d.values.push_back(bearing.x());
+            p_2d.values.push_back(bearing.y());
+            p_2d.values.push_back(bearing.z());
+            point_cloud.channels.push_back(p_2d);
+
+            geometry_msgs::Point32 fp2d_uv;
+            fp2d_uv.x = raw_pixel.x();
+            fp2d_uv.y = raw_pixel.y();
+            fp2d_uv.z = camera_id;
+            geometry_msgs::Point32 fp2d_norm;
+            fp2d_norm.x = bearing.x() / safe_z;
+            fp2d_norm.y = bearing.y() / safe_z;
+            fp2d_norm.z = bearing.z();
+            vkf.feature_points_id.push_back(it_per_id.feature_id);
+            vkf.feature_points_2d_uv.push_back(fp2d_uv);
+            vkf.feature_points_2d_norm.push_back(fp2d_norm);
+            vkf.feature_points_flag.push_back(it_per_id.solve_flag);
+
+            vins::LoopFeature loop_feature;
+            loop_feature.feature_id = it_per_id.feature_id;
+            loop_feature.camera_id = camera_id;
+            loop_feature.view_id = -1;
+            loop_feature.point_w = p;
+            loop_feature.bearing.x = bearing.x();
+            loop_feature.bearing.y = bearing.y();
+            loop_feature.bearing.z = bearing.z();
+            loop_feature.raw_uv = fp2d_uv;
+            loop_feature.virtual_uv.x = -1.0f;
+            loop_feature.virtual_uv.y = -1.0f;
+            loop_feature.virtual_uv.z = 0.0f;
+            vkf.loop_features.push_back(loop_feature);
+        };
+
+        append_observation(it_per_id.main_cam, frame_observation.point);
+        if (frame_observation.is_stereo && it_per_id.main_cam != 1)
+            append_observation(1, frame_observation.pointRight);
+    }
+
+    if (pub_keyframe_image.getNumSubscribers() > 0)
+    {
+        cv::Mat kf_img;
+        if (estimator.getKeyframeImage(estimator.Headers[keyframe_index], kf_img) && !kf_img.empty())
+        {
+            std_msgs::Header img_header;
+            img_header.stamp = odometry.header.stamp;
+            img_header.frame_id = "world";
+            sensor_msgs::ImagePtr img_msg =
+                cv_bridge::CvImage(img_header, "mono8", kf_img).toImageMsg();
+            publication.image = *img_msg;
+            publication.has_image = true;
+        }
+    }
+    return true;
+}
+
+void publishKeyframePublication(const KeyframePublication &publication)
+{
+    pub_keyframe_pose.publish(publication.pose);
+    pub_keyframe_point.publish(publication.points);
+    pub_viokeyframe.publish(publication.vio_keyframe);
+    if (publication.has_image)
+        pub_keyframe_image.publish(publication.image);
+}
+}
+
+void bufferWarmupKeyframe(const Estimator &estimator)
+{
+    KeyframePublication publication;
+    if (!buildKeyframePublication(estimator, publication))
+        return;
+
+    std::lock_guard<std::mutex> lock(warmup_keyframes_mutex);
+    const double stamp = publication.pose.header.stamp.toSec();
+    if (!warmup_keyframes.empty() &&
+        fabs(warmup_keyframes.back().pose.header.stamp.toSec() - stamp) < 1e-6)
+        return;
+    warmup_keyframes.push_back(std::move(publication));
+    while (warmup_keyframes.size() > kMaxWarmupKeyframes)
+        warmup_keyframes.pop_front();
+    ROS_INFO_THROTTLE(1.0,
+        "[loop_warmup] buffered=%zu oldest=%.3f newest=%.3f newest_pts=%zu",
+        warmup_keyframes.size(),
+        warmup_keyframes.front().pose.header.stamp.toSec(),
+        warmup_keyframes.back().pose.header.stamp.toSec(),
+        warmup_keyframes.back().points.points.size());
+}
+
+void flushWarmupKeyframes()
+{
+    std::deque<KeyframePublication> publications;
+    {
+        std::lock_guard<std::mutex> lock(warmup_keyframes_mutex);
+        publications.swap(warmup_keyframes);
+    }
+    if (publications.empty())
+        return;
+
+    std::stable_sort(publications.begin(), publications.end(),
+        [](const KeyframePublication &a, const KeyframePublication &b) {
+            return a.pose.header.stamp < b.pose.header.stamp;
+        });
+
+    ROS_INFO("[loop_warmup] publishing %zu buffered keyframes %.3f -> %.3f",
+        publications.size(),
+        publications.front().pose.header.stamp.toSec(),
+        publications.back().pose.header.stamp.toSec());
+    for (const KeyframePublication &publication : publications)
+        publishKeyframePublication(publication);
+}
+
+void clearWarmupKeyframes()
+{
+    std::lock_guard<std::mutex> lock(warmup_keyframes_mutex);
+    if (!warmup_keyframes.empty())
+        ROS_WARN("[loop_warmup] discarded %zu buffered keyframes after estimator reset/anomaly",
+            warmup_keyframes.size());
+    warmup_keyframes.clear();
+}
+
 void pubKeyframe(const Estimator &estimator)
 {
-    // pub camera pose, 2D-3D points of keyframe
-    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR && estimator.marginalization_flag == 0)
-    {
-        vins::VIOKeyframe vkf;
-        int i = WINDOW_SIZE - 2;
-        //Vector3d P = estimator.Ps[i] + estimator.Rs[i] * estimator.tic[0];
-        Vector3d P = estimator.Ps[i];
-        Quaterniond R = Quaterniond(estimator.Rs[i]);
-
-        nav_msgs::Odometry odometry;
-        odometry.header.stamp = ros::Time(estimator.Headers[WINDOW_SIZE - 2]);
-        odometry.header.frame_id = "world";
-        odometry.pose.pose.position.x = P.x();
-        odometry.pose.pose.position.y = P.y();
-        odometry.pose.pose.position.z = P.z();
-        odometry.pose.pose.orientation.x = R.x();
-        odometry.pose.pose.orientation.y = R.y();
-        odometry.pose.pose.orientation.z = R.z();
-        odometry.pose.pose.orientation.w = R.w();
-
-
-        //This is pose of left camera!!!!
-        Vector3d P_r = P + R * estimator.tic[0];
-        Quaterniond R_r = Quaterniond(R * estimator.ric[0]);
-        R_r.normalize();
-        //printf("time: %f t: %f %f %f r: %f %f %f %f\n", odometry.header.stamp.toSec(), P.x(), P.y(), P.z(), R.w(), R.x(), R.y(), R.z());
-        vkf.pose_cam.position.x = P_r.x();
-        vkf.pose_cam.position.y = P_r.y();
-        vkf.pose_cam.position.z = P_r.z();
-        vkf.pose_cam.orientation.x = R_r.x();
-        vkf.pose_cam.orientation.y = R_r.y();
-        vkf.pose_cam.orientation.z = R_r.z();
-        vkf.pose_cam.orientation.w = R_r.w();
-
-        vkf.camera_extrisinc.position.x = estimator.tic[0].x();
-        vkf.camera_extrisinc.position.y = estimator.tic[0].y();
-        vkf.camera_extrisinc.position.z = estimator.tic[0].z();
-
-        Quaterniond ric = Quaterniond(estimator.ric[0]);
-        ric.normalize();
-
-        vkf.camera_extrisinc.orientation.x = ric.x();
-        vkf.camera_extrisinc.orientation.y = ric.y();
-        vkf.camera_extrisinc.orientation.z = ric.z();
-        vkf.camera_extrisinc.orientation.w = ric.w();
-
-        vkf.pose_drone = odometry.pose.pose;
-        
-        vkf.header.stamp = odometry.header.stamp;
-
-
-        pub_keyframe_pose.publish(odometry);
-
-
-        sensor_msgs::PointCloud point_cloud;
-        point_cloud.header.stamp = ros::Time(estimator.Headers[WINDOW_SIZE - 2]);
-        point_cloud.header.frame_id = "world";
-        for (auto &_it : estimator.f_manager.feature)
-        {
-            auto & it_per_id = _it.second;
-            int frame_size = it_per_id.feature_per_frame.size();
-            if(it_per_id.start_frame < WINDOW_SIZE - 2 && it_per_id.start_frame + frame_size - 1 >= WINDOW_SIZE - 2 && it_per_id.solve_flag < 2)
-            {
-
-                int imu_i = it_per_id.start_frame;
-                Vector3d pts_i = it_per_id.feature_per_frame[0].point * it_per_id.estimated_depth;
-                Vector3d w_pts_i = estimator.Rs[imu_i] * (estimator.ric[it_per_id.main_cam] * pts_i + estimator.tic[it_per_id.main_cam])
-                                      + estimator.Ps[imu_i];
-                geometry_msgs::Point32 p;
-                p.x = w_pts_i(0);
-                p.y = w_pts_i(1);
-                p.z = w_pts_i(2);
-                point_cloud.points.push_back(p);
-
-                vkf.feature_points_3d.push_back(p);
-
-                // int imu_j = frame_size - 2;
-                int imu_j =  WINDOW_SIZE - 2 - it_per_id.start_frame;
-                sensor_msgs::ChannelFloat32 p_2d;
-                p_2d.values.push_back(it_per_id.feature_per_frame[imu_j].point.x());
-                p_2d.values.push_back(it_per_id.feature_per_frame[imu_j].point.y());
-                p_2d.values.push_back(it_per_id.feature_per_frame[imu_j].uv.x());
-                p_2d.values.push_back(it_per_id.feature_per_frame[imu_j].uv.y());
-                p_2d.values.push_back(it_per_id.feature_id);
-                point_cloud.channels.push_back(p_2d);
-
-                geometry_msgs::Point32 fp2d_uv;
-                geometry_msgs::Point32 fp2d_norm;
-                fp2d_uv.x = it_per_id.feature_per_frame[imu_j].uv.x();
-                fp2d_uv.y = it_per_id.feature_per_frame[imu_j].uv.y();
-                fp2d_uv.z = 0;
-
-                fp2d_norm.x = it_per_id.feature_per_frame[imu_j].point.x();
-                fp2d_norm.y = it_per_id.feature_per_frame[imu_j].point.y();
-                fp2d_norm.z = 0;
-
-                vkf.feature_points_id.push_back(it_per_id.feature_id);
-                vkf.feature_points_2d_uv.push_back(fp2d_uv);
-                vkf.feature_points_2d_norm.push_back(fp2d_norm);
-                vkf.feature_points_flag.push_back(it_per_id.solve_flag);
-            }
-
-        }
-        pub_keyframe_point.publish(point_cloud);
-        pub_viokeyframe.publish(vkf);
-    }
+    KeyframePublication publication;
+    if (buildKeyframePublication(estimator, publication))
+        publishKeyframePublication(publication);
 }

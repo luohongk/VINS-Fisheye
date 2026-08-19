@@ -50,8 +50,8 @@ public:
             ->generateCameraFromYamlFile(camera_config_file);
         raw_width = cam->imageWidth();
         raw_height = cam->imageHeight();
-        fisheye2cam_pt = cv::Mat::zeros(raw_width, raw_height, CV_32FC2);
-        fisheye2cam_id = cv::Mat::ones(raw_width, raw_height, CV_8UC1);
+        fisheye2cam_pt = cv::Mat::zeros((int)raw_height, (int)raw_width, CV_32FC2);
+        fisheye2cam_id = cv::Mat::ones((int)raw_height, (int)raw_width, CV_8UC1);
         fisheye2cam_id = fisheye2cam_id * 255;
         undistMaps = generateAllUndistMap(cam, cameraRotation, imgWidth, fov);
         // ROS_INFO("undismap size %ld", undistMaps.size());
@@ -72,7 +72,16 @@ public:
 
         cv::cuda::GpuMat img_cuda(image);
         cv::cuda::GpuMat output;
-        cv::cuda::remap(img_cuda, output, undistMapsGPUX[_id], undistMapsGPUY[_id], REMAP_FUNC);
+        try {
+            cv::cuda::remap(img_cuda, output, undistMapsGPUX[_id], undistMapsGPUY[_id], REMAP_FUNC);
+        } catch (const cv::Exception &e) {
+            ROS_WARN_STREAM_THROTTLE(5.0,
+                "[fisheye_undist] cv::cuda::remap failed; using CPU remap/upload fallback: "
+                << e.what());
+            cv::Mat output_cpu;
+            cv::remap(image, output_cpu, undistMaps[_id].first, undistMaps[_id].second, REMAP_FUNC);
+            output.upload(output_cpu);
+        }
         return output;
 #endif
     }
@@ -82,13 +91,12 @@ public:
 #ifdef USE_CUDA
         TicToc up;
         bool has_mask = mask.size() == undistMaps.size();
-        if (use_rgb) {
-            img_cuda.upload(image);
-        } else {
-            cv::Mat _tmp;
-            cv::cvtColor(image, _tmp, cv::COLOR_BGR2GRAY);
-            img_cuda.upload(_tmp);
-        }
+        cv::Mat input_cpu;
+        if (use_rgb)
+            input_cpu = image;
+        else
+            cv::cvtColor(image, input_cpu, cv::COLOR_BGR2GRAY);
+        img_cuda.upload(input_cpu);
 
         std::cout << "Upload cost " << up.toc() << std::endl;
 
@@ -99,11 +107,21 @@ public:
             if (!has_mask || (has_mask && mask[i]) ) {
                 cv::cuda::GpuMat output;
                 TicToc remap;
-                cv::cuda::remap(img_cuda, output, undistMapsGPUX[i], undistMapsGPUY[i], REMAP_FUNC);
+                try {
+                    cv::cuda::remap(img_cuda, output, undistMapsGPUX[i], undistMapsGPUY[i], REMAP_FUNC);
+                } catch (const cv::Exception &e) {
+                    ROS_WARN_STREAM_THROTTLE(5.0,
+                        "[fisheye_undist] cv::cuda::remap failed; using CPU remap fallback: "
+                        << e.what());
+                    cv::remap(input_cpu, tmp, undistMaps[i].first, undistMaps[i].second, REMAP_FUNC);
+                    output.release();
+                }
                 std::cout << "Remap cost " << remap.toc() << std::endl;
-                TicToc down;
-                output.download(tmp);
-                std::cout << "Download cost " << down.toc() << std::endl;
+                if (!output.empty()) {
+                    TicToc down;
+                    output.download(tmp);
+                    std::cout << "Download cost " << down.toc() << std::endl;
+                }
             }
             ret.push_back(tmp);
         }
@@ -115,19 +133,27 @@ public:
 #ifdef USE_CUDA
         cv::cuda::GpuMat img_cuda;
         bool has_mask = mask.size() == undistMaps.size();
-        if (use_rgb) {
-            img_cuda.upload(image);
-        } else {
-            cv::Mat _tmp;
-            cv::cvtColor(image, _tmp, cv::COLOR_BGR2GRAY);
-            img_cuda.upload(_tmp);
-        }
+        cv::Mat input_cpu;
+        if (use_rgb)
+            input_cpu = image;
+        else
+            cv::cvtColor(image, input_cpu, cv::COLOR_BGR2GRAY);
+        img_cuda.upload(input_cpu);
 
         std::vector<cv::cuda::GpuMat> ret;
         for (unsigned int i = 0; i < undistMaps.size(); i++) {
             cv::cuda::GpuMat output;
             if (!has_mask || (has_mask && mask[i]) ) {
-                cv::cuda::remap(img_cuda, output, undistMapsGPUX[i], undistMapsGPUY[i], REMAP_FUNC);
+                try {
+                    cv::cuda::remap(img_cuda, output, undistMapsGPUX[i], undistMapsGPUY[i], REMAP_FUNC);
+                } catch (const cv::Exception &e) {
+                    ROS_WARN_STREAM_THROTTLE(5.0,
+                        "[fisheye_undist] cv::cuda::remap failed; using CPU remap/upload fallback: "
+                        << e.what());
+                    cv::Mat output_cpu;
+                    cv::remap(input_cpu, output_cpu, undistMaps[i].first, undistMaps[i].second, REMAP_FUNC);
+                    output.upload(output_cpu);
+                }
             }
             ret.push_back(output);
         }
@@ -141,7 +167,7 @@ public:
         ret.resize(undistMaps.size());
         bool disable[5] = {0};
         disable[0] = !enable_top;
-        disable[5] = !enable_rear;
+        disable[4] = !enable_rear;
         if (use_rgb) {
 #pragma omp parallel for num_threads(5)
             for (unsigned int i = 0; i < 5; i++) {
@@ -163,6 +189,30 @@ public:
         }
 
         return ret;
+    }
+
+    double fullTopFocal() const {
+        if (imgWidth <= 0)
+            return f_center;
+        return f_center * raw_height / (double)imgWidth;
+    }
+
+    cv::Size rawSize() const {
+        return cv::Size((int)raw_width, (int)raw_height);
+    }
+
+    cv::Mat initFullTopUndistortRectifyMap(cv::Mat &map1, cv::Mat &map2) const {
+        const float f = (float)fullTopFocal();
+        return cam->initUndistortRectifyMap(
+            map1, map2,
+            f, f,
+            rawSize(),
+            (float)raw_width / 2.0f,
+            (float)raw_height / 2.0f);
+    }
+
+    void undistortFullTop(const cv::Mat &image, cv::Mat &out, const cv::Mat &map1, const cv::Mat &map2) const {
+        cv::remap(image, out, map1, map2, REMAP_FUNC);
     }
 
 
@@ -293,13 +343,17 @@ public:
         //First project the point to fisheye image plane
         Eigen::Vector2d imgPoint;
         cam->spaceToPlane(pts_cam, imgPoint);
-        cv::Point2f pt = fisheye2cam_pt.at<cv::Vec2f>(cv::Point(imgPoint.x(), imgPoint.y()));
+        cv::Point2f pt(0, 0);
         int id = 255;
         if ( !imgPoint.hasNaN() && 
                 imgPoint.x() >= 0 && imgPoint.x() < raw_width &&
                 imgPoint.y() >= 0 && imgPoint.y() < raw_height
             ) {
-                fisheye2cam_id.at<uint8_t>(cv::Point(imgPoint.x(), imgPoint.y()));
+                cv::Point img_pt((int)imgPoint.x(), (int)imgPoint.y());
+                const cv::Vec2f &mapped_pt = fisheye2cam_pt.at<cv::Vec2f>(img_pt);
+                pt.x = mapped_pt[0];
+                pt.y = mapped_pt[1];
+                id = fisheye2cam_id.at<uint8_t>(img_pt);
             }
         if (id != 255) {
             // std::cout << "\n\nPT" << pts_cam << " IMG " << imgPoint << " ID" << id << " PT " << pt << std::endl;
@@ -373,8 +427,8 @@ public:
 
                 map.at<cv::Vec2f>(cv::Point(x, y)) = cv::Vec2f(imgPoint.x(), imgPoint.y());
                 if(!isnan(imgPoint.x()) && !isnan(imgPoint.y()) && 
-                    imgPoint.x() >=0 && imgPoint.x() <= raw_width &&
-                    imgPoint.y() >=0 && imgPoint.y() <= raw_height
+                    imgPoint.x() >= 0 && imgPoint.x() < raw_width &&
+                    imgPoint.y() >= 0 && imgPoint.y() < raw_height
                 ) {
                     auto & pt = fisheye2cam_pt.at<cv::Vec2f>(cv::Point(imgPoint.x(), imgPoint.y()));
                     fisheye2cam_id.at<uint8_t>(cv::Point(imgPoint.x(), imgPoint.y())) = _id;
@@ -412,4 +466,3 @@ public:
     }
 
 };
-

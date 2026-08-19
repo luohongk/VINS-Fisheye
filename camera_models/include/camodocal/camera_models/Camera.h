@@ -49,7 +49,8 @@ class Camera
         SCARAMUZZA,
         POLYFISHEYE,
         FOV,
-        SPLINE
+        SPLINE,
+        EUCM
     };
 
     class Parameters

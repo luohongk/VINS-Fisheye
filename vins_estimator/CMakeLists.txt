@@ -93,6 +93,7 @@ message(STATUS "    catkin libraries: ${catkin_LIBRARIES}")
 
 add_message_files(
     FILES
+    LoopFeature.msg
     VIOKeyframe.msg
     FlattenImages.msg
 )
